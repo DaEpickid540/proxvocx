@@ -1,0 +1,38 @@
+{
+  "rules": {
+    "requests": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid",
+        "$requestId": {
+          ".validate": "newData.hasChildren(['url', 'createdAt'])",
+          "url": {
+            ".validate": "newData.isString() && newData.val().length <= 2048 && newData.val().matches(/^https?:\\/\\//i)"
+          },
+          "method": {
+            ".validate": "newData.isString() && newData.val().matches(/^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/)"
+          },
+          "body": { ".validate": "newData.isString() && newData.val().length <= 65536" },
+          "client": { ".validate": "newData.isString() && newData.val().length <= 64" },
+          "headers": {
+            "$header": { ".validate": "newData.isString() && newData.val().length <= 1024" }
+          },
+          "createdAt": { ".validate": "newData.val() <= now" },
+          "$other": { ".validate": false }
+        }
+      }
+    },
+    "responses": {
+      "$uid": {
+        // Only the service account (which bypasses these rules) writes responses.
+        // The client may read them and delete them once displayed.
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && auth.uid === $uid && !newData.exists()",
+        "$requestId": {
+          ".write": "auth != null && auth.uid === $uid && !newData.exists()"
+        }
+      }
+    },
+    "$other": { ".read": false, ".write": false }
+  }
+}

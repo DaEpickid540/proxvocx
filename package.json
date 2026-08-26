@@ -1,0 +1,19 @@
+{
+  "name": "proxvocx",
+  "version": "1.0.0",
+  "description": "Firebase Realtime Database backed HTTP proxy: a phone web client queues URL requests, a PC server fetches them and writes responses back.",
+  "type": "module",
+  "main": "server/index.js",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.7.0"
+  },
+  "license": "MIT",
+  "private": true
+}

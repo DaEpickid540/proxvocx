@@ -1,0 +1,8 @@
+node_modules/
+serviceAccountKey.json
+*.serviceAccountKey.json
+.env
+.env.local
+client/firebase-config.js
+npm-debug.log*
+.DS_Store
