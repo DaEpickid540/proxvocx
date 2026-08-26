@@ -1,18 +1,56 @@
 {
   "name": "proxvocx",
-  "version": "1.0.0",
-  "description": "Firebase Realtime Database backed HTTP proxy: a phone web client queues URL requests, a PC server fetches them and writes responses back.",
+  "version": "2.0.0",
+  "description": "Firebase-brokered PC connector: browse the web through your PC, or take it over outright. One desktop install, one hosted site, no Cloud Functions.",
   "type": "module",
-  "main": "server/index.js",
+  "main": "desktop/main.js",
   "engines": {
-    "node": ">=18.17"
+    "node": ">=20"
   },
   "scripts": {
-    "start": "node server/index.js",
-    "dev": "node --watch server/index.js"
+    "start": "electron .",
+    "dev": "electron . --inspect",
+    "site": "npx --yes serve public",
+    "build": "electron-builder",
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux",
+    "deploy": "firebase deploy --only hosting,database"
   },
-  "dependencies": {
-    "firebase-admin": "^12.7.0"
+  "devDependencies": {
+    "electron": "^31.3.1",
+    "electron-builder": "^24.13.3"
+  },
+  "optionalDependencies": {
+    "@nut-tree-fork/nut-js": "^4.2.0"
+  },
+  "build": {
+    "appId": "dev.proxvocx.connector",
+    "productName": "proxvocx",
+    "files": [
+      "desktop/**/*",
+      "public/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.utilities",
+      "extendInfo": {
+        "NSCameraUsageDescription": "proxvocx does not use the camera.",
+        "NSMicrophoneUsageDescription": "proxvocx does not use the microphone."
+      }
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Utility"
+    }
   },
   "license": "MIT",
   "private": true

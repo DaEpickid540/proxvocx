@@ -1,38 +1,154 @@
 {
   "rules": {
-    "requests": {
+    // ── machines ────────────────────────────────────────────────────────
+    // Two principals per machine: the PC's own device account (deviceUid,
+    // an anonymous identity that belongs to the installation) and the user
+    // account it has been paired to (ownerUid). Nobody else sees anything.
+    //
+    // Note that in Realtime Database a child .write can only *widen* access,
+    // never narrow it — so the broad grant here is the device only, and the
+    // owner is granted exactly the subtrees it needs further down.
+    "machines": {
+      "$machineId": {
+        ".read": "auth != null && (data.child('deviceUid').val() === auth.uid || data.child('ownerUid').val() === auth.uid)",
+        ".write": "auth != null && ((!data.exists() && newData.child('deviceUid').val() === auth.uid) || data.child('deviceUid').val() === auth.uid)",
+
+        "deviceUid": {
+          // Claimed once, at registration, and never reassigned.
+          ".validate": "newData.isString() && newData.val() === auth.uid && !data.exists()"
+        },
+
+        "ownerUid": {
+          // Only the PC stamps ownership, and only after it has seen a valid
+          // claim on its pairing code. Removing it is how the PC unpairs.
+          ".validate": "!newData.exists() || (newData.isString() && newData.val().length > 0)"
+        },
+
+        "meta": {
+          "name":       { ".validate": "newData.isString() && newData.val().length <= 64" },
+          "platform":   { ".validate": "newData.isString() && newData.val().length <= 32" },
+          "appVersion": { ".validate": "newData.isString() && newData.val().length <= 32" },
+          "createdAt":  { ".validate": "newData.isNumber()" },
+          "$other": { ".validate": false }
+        },
+
+        "presence": {
+          "online":   { ".validate": "newData.isBoolean()" },
+          "lastSeen": { ".validate": "newData.isNumber()" },
+          "capabilities": {
+            "proxy":   { ".validate": "newData.isBoolean()" },
+            "control": { ".validate": "newData.isBoolean()" },
+            "input":   { ".validate": "newData.isBoolean()" },
+            "$other": { ".validate": false }
+          },
+          "$other": { ".validate": false }
+        },
+
+        // ── proxy queue ───────────────────────────────────────────────
+        // The owner enqueues; the PC (covered by the grant above) drains.
+        "requests": {
+          "$requestId": {
+            ".write": "auth != null && root.child('machines/' + $machineId + '/ownerUid').val() === auth.uid",
+            ".validate": "newData.hasChildren(['url', 'createdAt'])",
+            "url": {
+              ".validate": "newData.isString() && newData.val().length <= 2048 && newData.val().matches(/^https?:\\/\\//i)"
+            },
+            "method":    { ".validate": "newData.isString() && newData.val().matches(/^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/)" },
+            "body":      { ".validate": "newData.isString() && newData.val().length <= 65536" },
+            "client":    { ".validate": "newData.isString() && newData.val().length <= 64" },
+            "createdAt": { ".validate": "newData.val() <= now" },
+            "headers": {
+              "$header": { ".validate": "newData.isString() && newData.val().length <= 1024" }
+            },
+            "$other": { ".validate": false }
+          }
+        },
+
+        // The PC writes responses; the owner may read them (via the machine
+        // read rule) and delete them once displayed, but never forge one.
+        "responses": {
+          "$requestId": {
+            ".write": "auth != null && root.child('machines/' + $machineId + '/ownerUid').val() === auth.uid && !newData.exists()"
+          }
+        },
+
+        // ── WebRTC signalling ─────────────────────────────────────────
+        // Both peers need to write here: the owner posts the session and its
+        // answer, the PC posts the offer. Only handshake data lives in this
+        // subtree — video and input never touch the database.
+        "sessions": {
+          "$sessionId": {
+            ".write": "auth != null && root.child('machines/' + $machineId + '/ownerUid').val() === auth.uid",
+            "clientUid": { ".validate": "newData.isString()" },
+            "mode":      { ".validate": "newData.val() === 'control'" },
+            "state":     { ".validate": "newData.isString() && newData.val().length <= 24" },
+            "error":     { ".validate": "newData.isString() && newData.val().length <= 256" },
+            "createdAt": { ".validate": "newData.isNumber()" },
+            "offer":  { ".validate": "newData.hasChildren(['type', 'sdp'])" },
+            "answer": { ".validate": "newData.hasChildren(['type', 'sdp'])" },
+            "ice": {
+              "$role": {
+                "$candidateId": {
+                  ".validate": "newData.hasChild('candidate')"
+                }
+              }
+            },
+            "$other": { ".validate": false }
+          }
+        },
+
+        "$other": { ".validate": false }
+      }
+    },
+
+    // ── the account's machine list ──────────────────────────────────────
+    // Purely a convenience index. An entry is only allowed to exist if the
+    // machine really does name this account as its owner, so a client cannot
+    // fabricate access to somebody else's PC by writing to its own list.
+    "users": {
       "$uid": {
         ".read": "auth != null && auth.uid === $uid",
         ".write": "auth != null && auth.uid === $uid",
-        "$requestId": {
-          ".validate": "newData.hasChildren(['url', 'createdAt'])",
-          "url": {
-            ".validate": "newData.isString() && newData.val().length <= 2048 && newData.val().matches(/^https?:\\/\\//i)"
-          },
-          "method": {
-            ".validate": "newData.isString() && newData.val().matches(/^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)$/)"
-          },
-          "body": { ".validate": "newData.isString() && newData.val().length <= 65536" },
-          "client": { ".validate": "newData.isString() && newData.val().length <= 64" },
-          "headers": {
-            "$header": { ".validate": "newData.isString() && newData.val().length <= 1024" }
-          },
-          "createdAt": { ".validate": "newData.val() <= now" },
-          "$other": { ".validate": false }
-        }
+        "machines": {
+          "$machineId": {
+            ".validate": "!newData.exists() || root.child('machines/' + $machineId + '/ownerUid').val() === $uid",
+            "name":     { ".validate": "newData.isString() && newData.val().length <= 64" },
+            "pairedAt": { ".validate": "newData.isNumber()" },
+            "$other": { ".validate": false }
+          }
+        },
+        "$other": { ".validate": false }
       }
     },
-    "responses": {
-      "$uid": {
-        // Only the service account (which bypasses these rules) writes responses.
-        // The client may read them and delete them once displayed.
-        ".read": "auth != null && auth.uid === $uid",
-        ".write": "auth != null && auth.uid === $uid && !newData.exists()",
-        "$requestId": {
-          ".write": "auth != null && auth.uid === $uid && !newData.exists()"
-        }
+
+    // ── pairing codes ───────────────────────────────────────────────────
+    // Knowing the code IS the secret, so a code node is readable by any
+    // signed-in user — but `pairing` itself is not, so the codes cannot be
+    // listed or enumerated. A code is 30^8, lives five minutes, and can be
+    // claimed exactly once.
+    "pairing": {
+      "$code": {
+        ".read": "auth != null",
+        ".write": "auth != null && ((!data.exists() && newData.child('deviceUid').val() === auth.uid) || data.child('deviceUid').val() === auth.uid)",
+        ".validate": "!newData.exists() || newData.hasChildren(['machineId', 'deviceUid', 'expiresAt'])",
+
+        "machineId":   { ".validate": "newData.isString() && root.child('machines/' + newData.val() + '/deviceUid').val() === auth.uid" },
+        "machineName": { ".validate": "newData.isString() && newData.val().length <= 64" },
+        "deviceUid":   { ".validate": "newData.isString() && newData.val() === auth.uid" },
+        "createdAt":   { ".validate": "newData.isNumber()" },
+        "expiresAt":   { ".validate": "newData.isNumber() && newData.val() <= now + 900000" },
+
+        "claimedBy": {
+          // The one write a non-device account may make anywhere under
+          // /pairing: stamping its own uid on an unclaimed, unexpired code.
+          ".write": "auth != null && !data.exists() && newData.val() === auth.uid && data.parent().child('expiresAt').val() > now",
+          ".validate": "!newData.exists() || newData.isString()"
+        },
+
+        "$other": { ".validate": false }
       }
     },
+
     "$other": { ".read": false, ".write": false }
   }
 }

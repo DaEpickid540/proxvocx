@@ -1,8 +1,13 @@
 node_modules/
-serviceAccountKey.json
-*.serviceAccountKey.json
-.env
-.env.local
-client/firebase-config.js
+dist/
+out/
+
+# The desktop app keeps its machine identity and settings in userData, not here.
+connector.json
+
+# Never commit a pre-filled Firebase config that points at someone's project.
+public/js/firebase-config.local.js
+
 npm-debug.log*
 .DS_Store
+Thumbs.db
