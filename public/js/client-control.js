@@ -1,0 +1,325 @@
+/**
+ * PC Control mode: the viewer.
+ *
+ * Creates a session under the machine, answers the connector's WebRTC offer,
+ * and paints the incoming screen into a <video>. Once the pointer is inside
+ * the picture, mouse and keyboard are translated into the compact wire format
+ * in `input-protocol.js` and pushed down the data channel.
+ *
+ * Keyboard capture is explicit — you click into the video to take it and press
+ * Escape to give it back — because otherwise the browser's own shortcuts and
+ * the PC's would fight over every keystroke.
+ */
+import { ref, set, update } from './firebase.js';
+import { paths } from './paths.js';
+import { iceServers, attachIce, createSession, closeSession, waitForDescription } from './signaling.js';
+import {
+  INPUT_CHANNEL, pointer, wheel, key, text as textEvent, clipboard as clipboardEvent,
+  buttonFromEvent,
+} from './input-protocol.js';
+
+export function createControlViewer({ db, uid, getMachineId, elements, onState }) {
+  const { stage, video, overlay, overlayTitle, overlayMessage, connectBtn, hint } = elements;
+
+  let pc = null;
+  let channel = null;
+  let sessionId = null;
+  let detachIce = null;
+  let statsTimer = null;
+  let captured = false;
+  let hostAllowsInput = false;
+  let screen = { width: 1920, height: 1080 };
+  let lastMoveSent = 0;
+
+  /* ── connect ───────────────────────────────────────────────── */
+
+  async function connect() {
+    const machineId = getMachineId();
+    if (!machineId) {
+      showOverlay('No PC selected', 'Pick a PC to control first.', true);
+      return;
+    }
+    if (pc) return;
+
+    showOverlay('Connecting…', 'Waiting for the PC to offer its screen.', false);
+    stage.dataset.state = 'connecting';
+    onState?.({ connected: false, status: 'connecting' });
+
+    try {
+      sessionId = await createSession(db, machineId, uid, 'control');
+
+      const offer = await waitForDescription(db, paths.sessionOffer(machineId, sessionId), 30_000);
+      screen = offer.screen || screen;
+      hostAllowsInput = !!offer.capabilities?.input;
+
+      pc = new RTCPeerConnection({ iceServers: iceServers() });
+      detachIce = attachIce(db, machineId, sessionId, pc, 'viewer');
+
+      pc.addEventListener('track', (event) => {
+        video.srcObject = event.streams[0];
+        video.play().catch(() => {
+          /* Autoplay is allowed because the element is muted; ignore races. */
+        });
+      });
+
+      pc.addEventListener('datachannel', (event) => {
+        if (event.channel.label !== INPUT_CHANNEL) return;
+        channel = event.channel;
+        channel.addEventListener('close', () => { channel = null; });
+      });
+
+      pc.addEventListener('connectionstatechange', () => {
+        const st = pc?.connectionState;
+        if (st === 'connected') {
+          overlay.hidden = true;
+          stage.dataset.state = 'live';
+          onState?.({
+            connected: true,
+            status: 'connected',
+            canInput: hostAllowsInput,
+            screen,
+          });
+          startStats();
+        } else if (['failed', 'closed', 'disconnected'].includes(st)) {
+          disconnect(st === 'failed'
+            ? 'The peer connection failed. The PC may be behind a network that needs a TURN relay.'
+            : 'The PC ended the session.');
+        }
+      });
+
+      await pc.setRemoteDescription(new RTCSessionDescription({ type: offer.type, sdp: offer.sdp }));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      await set(ref(db, paths.sessionAnswer(machineId, sessionId)), {
+        type: answer.type,
+        sdp: answer.sdp,
+      });
+      await update(ref(db, paths.session(machineId, sessionId)), { state: 'answered' });
+    } catch (err) {
+      await teardown();
+      showOverlay('Could not connect', err.message, true);
+      onState?.({ connected: false, status: 'failed' });
+    }
+  }
+
+  /* ── disconnect ────────────────────────────────────────────── */
+
+  async function disconnect(why = 'Session ended.') {
+    const wasLive = !!pc;
+    await teardown();
+    if (wasLive) {
+      showOverlay('Disconnected', why, true);
+      onState?.({ connected: false, status: 'idle' });
+    }
+  }
+
+  async function teardown() {
+    releaseKeyboard();
+    clearInterval(statsTimer);
+    statsTimer = null;
+    detachIce?.();
+    detachIce = null;
+
+    try { channel?.close(); } catch { /* already closed */ }
+    channel = null;
+
+    try { pc?.close(); } catch { /* already closed */ }
+    pc = null;
+
+    if (video.srcObject) {
+      for (const track of video.srcObject.getTracks()) track.stop();
+      video.srcObject = null;
+    }
+
+    const machineId = getMachineId();
+    if (machineId && sessionId) await closeSession(db, machineId, sessionId);
+    sessionId = null;
+    stage.dataset.state = 'idle';
+  }
+
+  /* ── sending input ─────────────────────────────────────────── */
+
+  const send = (event) => {
+    if (!channel || channel.readyState !== 'open' || !hostAllowsInput) return;
+    try {
+      channel.send(JSON.stringify(event));
+    } catch {
+      /* Buffer full — dropping a move frame is better than blocking. */
+    }
+  };
+
+  /**
+   * Maps a pointer position inside the letterboxed <video> onto 0..1 of the
+   * remote screen. `object-fit` means the picture rarely fills the element,
+   * so the empty bars have to be subtracted or the cursor drifts.
+   */
+  function toScreenPoint(event) {
+    const rect = video.getBoundingClientRect();
+    const videoRatio = (video.videoWidth || screen.width) / (video.videoHeight || screen.height);
+    const boxRatio = rect.width / rect.height;
+
+    let drawWidth = rect.width;
+    let drawHeight = rect.height;
+    if (boxRatio > videoRatio) drawWidth = rect.height * videoRatio;
+    else drawHeight = rect.width / videoRatio;
+
+    const offsetX = (rect.width - drawWidth) / 2;
+    const offsetY = (rect.height - drawHeight) / 2;
+
+    const x = (event.clientX - rect.left - offsetX) / drawWidth;
+    const y = (event.clientY - rect.top - offsetY) / drawHeight;
+    return { x, y, inside: x >= 0 && x <= 1 && y >= 0 && y <= 1 };
+  }
+
+  function bindInput() {
+    video.addEventListener('pointermove', (event) => {
+      const point = toScreenPoint(event);
+      if (!point.inside) return;
+      // ~120Hz ceiling: a trackpad can fire far faster than the PC can replay.
+      const now = performance.now();
+      if (now - lastMoveSent < 8) return;
+      lastMoveSent = now;
+      send(pointer('move', point.x, point.y));
+    });
+
+    video.addEventListener('pointerdown', (event) => {
+      const point = toScreenPoint(event);
+      if (!point.inside) return;
+      event.preventDefault();
+      captureKeyboard();
+      send(pointer('down', point.x, point.y, buttonFromEvent(event)));
+    });
+
+    video.addEventListener('pointerup', (event) => {
+      const point = toScreenPoint(event);
+      if (!point.inside) return;
+      event.preventDefault();
+      send(pointer('up', point.x, point.y, buttonFromEvent(event)));
+    });
+
+    video.addEventListener('dblclick', (event) => {
+      const point = toScreenPoint(event);
+      if (point.inside) send(pointer('dblclick', point.x, point.y, buttonFromEvent(event)));
+    });
+
+    // The remote desktop has its own context menu; never show the browser's.
+    video.addEventListener('contextmenu', (event) => event.preventDefault());
+
+    video.addEventListener('wheel', (event) => {
+      const point = toScreenPoint(event);
+      if (!point.inside) return;
+      event.preventDefault();
+      send(wheel(point.x, point.y, event.deltaX, event.deltaY));
+    }, { passive: false });
+
+    window.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('keyup', onKeyUp, true);
+    video.addEventListener('blur', releaseKeyboard);
+
+    video.addEventListener('paste', (event) => {
+      const value = event.clipboardData?.getData('text');
+      if (value) send(textEvent(value));
+    });
+  }
+
+  function onKeyDown(event) {
+    if (!captured) return;
+    if (event.key === 'Escape') {
+      releaseKeyboard();
+      event.preventDefault();
+      return;
+    }
+    event.preventDefault();
+    send(key('down', event));
+  }
+
+  function onKeyUp(event) {
+    if (!captured) return;
+    event.preventDefault();
+    send(key('up', event));
+  }
+
+  function captureKeyboard() {
+    if (captured || !hostAllowsInput) return;
+    captured = true;
+    stage.classList.add('captured');
+    hint.hidden = false;
+    video.focus();
+  }
+
+  function releaseKeyboard() {
+    if (!captured) return;
+    captured = false;
+    stage.classList.remove('captured');
+    hint.hidden = true;
+  }
+
+  /* ── stats ─────────────────────────────────────────────────── */
+
+  function startStats() {
+    clearInterval(statsTimer);
+    statsTimer = setInterval(async () => {
+      if (!pc) return;
+      try {
+        const report = await pc.getStats();
+        let rtt = null;
+        let fps = null;
+        report.forEach((entry) => {
+          if (entry.type === 'candidate-pair' && entry.state === 'succeeded' && entry.currentRoundTripTime != null) {
+            rtt = Math.round(entry.currentRoundTripTime * 1000);
+          }
+          if (entry.type === 'inbound-rtp' && entry.kind === 'video') {
+            fps = Math.round(entry.framesPerSecond || 0);
+          }
+        });
+        onState?.({ connected: true, status: 'connected', rtt, fps, canInput: hostAllowsInput, screen });
+      } catch {
+        /* getStats can throw during teardown */
+      }
+    }, 2000);
+  }
+
+  /* ── overlay ───────────────────────────────────────────────── */
+
+  function showOverlay(title, message, showButton) {
+    overlayTitle.textContent = title;
+    overlayMessage.textContent = message;
+    connectBtn.hidden = !showButton;
+    overlay.hidden = false;
+  }
+
+  bindInput();
+
+  return {
+    connect,
+    disconnect,
+    get connected() { return pc?.connectionState === 'connected'; },
+    get canInput() { return hostAllowsInput; },
+
+    /** Ctrl+Alt+Del cannot be typed into a browser — send it as three keys. */
+    sendCtrlAltDel() {
+      if (!hostAllowsInput) return;
+      const chord = [
+        { code: 'ControlLeft', k: 'Control' },
+        { code: 'AltLeft', k: 'Alt' },
+        { code: 'Delete', k: 'Delete' },
+      ];
+      for (const item of chord) send({ t: 'k', a: 'down', key: item.k, code: item.code, m: 0 });
+      for (const item of [...chord].reverse()) send({ t: 'k', a: 'up', key: item.k, code: item.code, m: 0 });
+    },
+
+    async sendClipboard() {
+      if (!hostAllowsInput) return false;
+      try {
+        const value = await navigator.clipboard.readText();
+        if (!value) return false;
+        send(clipboardEvent(value));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+
+    reset() { return disconnect('Switched PC.'); },
+  };
+}

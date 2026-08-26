@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>proxvocx · client</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Serif+Display&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="../css/base.css">
+<link rel="stylesheet" href="../css/client.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="logo">
+    <span class="logo-dot"></span>
+    <span class="logo-name">proxvocx</span>
+  </div>
+
+  <button class="machine-pill" id="machinePill" title="Change PC">
+    <span class="machine-pill-dot" id="machineDot"></span>
+    <span class="machine-pill-name" id="machineLabel">No PC selected</span>
+  </button>
+
+  <div class="topbar-spacer"></div>
+
+  <div class="segmented" role="tablist" aria-label="Mode">
+    <button class="segmented-opt active" id="modeBrowser" role="tab" aria-selected="true">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18z"/>
+      </svg>
+      <span class="seg-label">Browser</span>
+    </button>
+    <button class="segmented-opt" id="modeControl" role="tab" aria-selected="false">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+      </svg>
+      <span class="seg-label">PC Control</span>
+    </button>
+  </div>
+
+  <div class="topbar-right">
+    <button class="avatar" id="accountBtn" title="Account">?</button>
+  </div>
+</header>
+
+<!-- ── BROWSER MODE ─────────────────────────────────────────── -->
+<section class="pane active" id="paneBrowser">
+  <div class="omnibar">
+    <button class="nav-btn" id="navBack" title="Back" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+    </button>
+    <button class="nav-btn" id="navForward" title="Forward" disabled>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+    </button>
+    <button class="nav-btn" id="navReload" title="Reload">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
+    </button>
+
+    <div class="url-field">
+      <span class="url-lock" id="urlLock">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+      </span>
+      <input id="urlInput" type="text" placeholder="Search or enter a URL" autocomplete="off"
+             autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go">
+    </div>
+
+    <button class="btn btn--primary btn--sm" id="navGo">Go</button>
+  </div>
+
+  <div class="browser-stage" id="browserStage" data-state="empty">
+    <div class="load-bar" id="loadBar"></div>
+    <iframe class="browser-frame" id="browserFrame"
+            sandbox="allow-same-origin allow-forms"
+            referrerpolicy="no-referrer"></iframe>
+
+    <div class="stage-overlay" id="stageOverlay">
+      <div class="stage-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18z"/>
+        </svg>
+      </div>
+      <h2 class="stage-title" id="stageTitle">Browse through your PC</h2>
+      <p class="stage-msg" id="stageMsg">
+        Pages are fetched by the connector on your PC and handed back through
+        Firebase. Nothing on this device talks to the site directly.
+      </p>
+      <div class="quick-links" id="quickLinks"></div>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <span id="statusText">Ready</span>
+    <span class="statusbar-spacer"></span>
+    <span id="statusBytes"></span>
+    <span id="statusTime"></span>
+  </div>
+</section>
+
+<!-- ── PC CONTROL MODE ──────────────────────────────────────── -->
+<section class="pane" id="paneControl">
+  <div class="control-stage" id="controlStage" data-state="idle">
+    <video class="control-video" id="controlVideo" autoplay playsinline muted tabindex="0"></video>
+
+    <div class="stage-overlay" id="controlOverlay">
+      <div class="stage-icon" id="controlIcon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+        </svg>
+      </div>
+      <h2 class="stage-title" id="controlTitle">Take over your PC</h2>
+      <p class="stage-msg" id="controlMsg">
+        The screen streams straight from the PC over an encrypted peer
+        connection. Click into the picture to send mouse and keyboard.
+      </p>
+      <button class="btn btn--primary" id="connectControlBtn">Connect</button>
+    </div>
+
+    <div class="capture-hint" id="captureHint" hidden>Press Esc to release the keyboard</div>
+  </div>
+
+  <div class="control-toolbar">
+    <button class="btn btn--ghost btn--sm" id="controlDisconnect" disabled>Disconnect</button>
+    <button class="btn btn--ghost btn--sm" id="controlFullscreen">Fullscreen</button>
+    <button class="btn btn--ghost btn--sm" id="controlCtrlAltDel" disabled>Ctrl+Alt+Del</button>
+    <button class="btn btn--ghost btn--sm" id="controlPasteBtn" disabled>Send clipboard</button>
+    <span class="spacer"></span>
+    <span class="latency" id="controlStats">
+      <span class="latency-dot" id="latencyDot"></span>
+      <span id="latencyText">not connected</span>
+    </span>
+  </div>
+</section>
+
+<div class="boot-overlay" id="boot">
+  <div class="spinner"></div>
+  <p class="boot-label" id="bootLabel">Loading your PCs…</p>
+</div>
+
+<script type="module" src="../js/client.js"></script>
+</body>
+</html>

@@ -1,0 +1,478 @@
+/**
+ * Client app shell.
+ *
+ * Owns the account, the list of paired PCs, which one is selected, and which
+ * of the two modes is on screen. Browser mode and PC Control mode are separate
+ * modules that get handed the selected machine.
+ *
+ * The server picker is the gate: nothing loads until a PC is chosen, and it
+ * comes back by itself if the chosen PC drops offline.
+ */
+import {
+  initFirebase,
+  MissingConfigError,
+  usePersistentAuth,
+  waitForAuth,
+  signOut,
+  ref,
+  get,
+  onValue,
+} from './firebase.js';
+import { paths, isPresenceFresh, formatPairingCode } from './paths.js';
+import { claimPairingCode, unpairMachine, PairingError } from './pairing.js';
+import { createMiniBrowser, normaliseUrl } from './client-browser.js';
+import { createControlViewer } from './client-control.js';
+import { $, el, openModal, toast, confirmModal, formatBytes, formatRelative, setBusy } from './ui.js';
+
+const SELECTED_KEY = 'proxvocx.selectedMachine';
+const LAST_MODE_KEY = 'proxvocx.mode';
+
+const QUICK_LINKS = [
+  ['Wikipedia', 'https://en.wikipedia.org'],
+  ['Hacker News', 'https://news.ycombinator.com'],
+  ['DuckDuckGo', 'https://duckduckgo.com/html/?q=proxvocx'],
+  ['example.com', 'https://example.com'],
+];
+
+const state = {
+  db: null,
+  auth: null,
+  uid: null,
+  machines: new Map(),   // machineId -> { name, pairedAt, presence, meta }
+  selected: null,
+  mode: 'browser',
+  browser: null,
+  control: null,
+  presenceWatchers: new Map(),
+  pickerOpen: false,
+};
+
+/* ── machine list ────────────────────────────────────────────── */
+
+function watchMachines() {
+  onValue(ref(state.db, paths.userMachines(state.uid)), (snapshot) => {
+    const seen = new Set();
+    snapshot.forEach((child) => {
+      const id = child.key;
+      seen.add(id);
+      const existing = state.machines.get(id) || {};
+      state.machines.set(id, { ...existing, ...child.val(), id });
+      watchPresence(id);
+    });
+
+    for (const id of Array.from(state.machines.keys())) {
+      if (seen.has(id)) continue;
+      state.machines.delete(id);
+      state.presenceWatchers.get(id)?.();
+      state.presenceWatchers.delete(id);
+      if (state.selected === id) selectMachine(null);
+    }
+    renderMachinePill();
+  }, (err) => {
+    toast(`Could not read your PCs: ${err.message}`, 'danger');
+  });
+}
+
+function watchPresence(machineId) {
+  if (state.presenceWatchers.has(machineId)) return;
+  const stop = onValue(ref(state.db, paths.presence(machineId)), (snapshot) => {
+    const entry = state.machines.get(machineId);
+    if (!entry) return;
+    const wasOnline = isPresenceFresh(entry.presence);
+    entry.presence = snapshot.val() || null;
+    const isOnline = isPresenceFresh(entry.presence);
+    renderMachinePill();
+
+    // The selected PC going away is exactly when the picker should reappear.
+    if (state.selected === machineId && wasOnline && !isOnline) {
+      toast(`${entry.name} went offline`, 'danger');
+      openPicker({ reason: 'offline' });
+    }
+  }, () => { /* denied means unpaired on the PC side; the list watch handles it */ });
+  state.presenceWatchers.set(machineId, stop);
+}
+
+function machineList() {
+  return Array.from(state.machines.values()).sort((a, b) => {
+    const online = Number(isPresenceFresh(b.presence)) - Number(isPresenceFresh(a.presence));
+    if (online) return online;
+    return (b.pairedAt || 0) - (a.pairedAt || 0);
+  });
+}
+
+function selectMachine(machineId) {
+  state.selected = machineId;
+  try {
+    if (machineId) localStorage.setItem(SELECTED_KEY, machineId);
+    else localStorage.removeItem(SELECTED_KEY);
+  } catch { /* private mode */ }
+
+  state.browser?.reset();
+  state.control?.reset();
+  renderMachinePill();
+}
+
+function renderMachinePill() {
+  const entry = state.selected ? state.machines.get(state.selected) : null;
+  const online = entry ? isPresenceFresh(entry.presence) : false;
+  $('#machineLabel').textContent = entry ? entry.name : 'No PC selected';
+  const dot = $('#machineDot');
+  dot.classList.toggle('online', online);
+  dot.classList.toggle('offline', !!entry && !online);
+}
+
+/* ── server picker ───────────────────────────────────────────── */
+
+async function openPicker({ reason = 'manual' } = {}) {
+  if (state.pickerOpen) return;
+  state.pickerOpen = true;
+
+  const dismissable = reason === 'manual' && !!state.selected;
+
+  const chosen = await openModal((close) => {
+    const listHost = el('div', { class: 'machine-list' });
+    const codeProblem = el('p', { class: 'notice notice--danger', hidden: true });
+
+    const renderList = () => {
+      const machines = machineList();
+      if (!machines.length) {
+        listHost.replaceChildren(el('p', { class: 'empty-state' },
+          'No PCs are paired to this account yet. Add one with a code below.'));
+        return;
+      }
+      listHost.replaceChildren(...machines.map((machine) => {
+        const online = isPresenceFresh(machine.presence);
+        const caps = machine.presence?.capabilities || {};
+        const detail = online
+          ? [caps.proxy && 'browsing', caps.control && 'control', caps.input && 'input']
+              .filter(Boolean).join(' · ') || 'connected, no capabilities'
+          : `offline · last seen ${formatRelative(machine.presence?.lastSeen)}`;
+
+        const row = el('button', {
+          class: `machine-row ${online ? '' : 'offline'} ${state.selected === machine.id ? 'selected' : ''}`,
+        },
+          el('span', { class: 'machine-glyph' },
+            iconSvg('M2 3h20v14H2zM8 21h8M12 17v4')),
+          el('div', { class: 'machine-info' },
+            el('div', { class: 'machine-title' }, machine.name || 'PC'),
+            el('div', { class: 'machine-meta' }, detail),
+          ),
+          el('span', { class: `badge ${online ? 'badge--online' : 'badge--offline'} badge--dot` },
+            online ? 'Online' : 'Offline'),
+        );
+
+        row.addEventListener('click', () => {
+          if (!online) {
+            toast('That PC is offline. Start the connector on it first.', 'danger');
+            return;
+          }
+          close(machine.id);
+        });
+
+        const forget = el('button', { class: 'btn btn--xs', title: 'Forget this PC' }, 'Forget');
+        forget.addEventListener('click', async (event) => {
+          event.stopPropagation();
+          const sure = await confirmModal({
+            title: `Forget ${machine.name}?`,
+            message: 'You will need a new pairing code from that PC to use it again.',
+            confirmLabel: 'Forget',
+            danger: true,
+          });
+          if (!sure) return;
+          await unpairMachine(state.db, state.uid, machine.id);
+          toast('PC forgotten', 'info');
+        });
+        row.append(forget);
+        return row;
+      }));
+    };
+
+    renderList();
+
+    /* code entry */
+    const codeInput = el('input', {
+      class: 'text-input text-input--mono',
+      placeholder: 'ABCD-1234',
+      maxlength: 9,
+      autocapitalize: 'characters',
+      autocomplete: 'off',
+      spellcheck: 'false',
+    });
+    const addBtn = el('button', { class: 'btn btn--primary' }, 'Pair');
+
+    const submitCode = async () => {
+      codeProblem.hidden = true;
+      setBusy(addBtn, true, 'Pairing…');
+      try {
+        const result = await claimPairingCode(state.db, codeInput.value, state.uid);
+        toast(`${result.machineName} paired`, 'success');
+        codeInput.value = '';
+        // Give the machine list a moment to catch up, then jump straight in.
+        close(result.machineId);
+      } catch (err) {
+        codeProblem.textContent = err instanceof PairingError
+          ? err.message
+          : `Could not pair: ${err.message}`;
+        codeProblem.hidden = false;
+        setBusy(addBtn, false);
+      }
+    };
+
+    addBtn.addEventListener('click', submitCode);
+    codeInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') submitCode();
+    });
+    codeInput.addEventListener('input', () => {
+      const raw = codeInput.value.toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, 8);
+      codeInput.value = raw.length > 4 ? formatPairingCode(raw) : raw;
+    });
+
+    const heading = {
+      offline: ['That PC went offline', 'Pick another PC, or bring that one back online and try again.'],
+      none: ['Choose a PC', 'Pick the machine you want to browse through or take control of.'],
+      manual: ['Switch PC', 'Everything you do runs through the PC you pick here.'],
+    }[reason] || ['Choose a PC', 'Pick a machine to connect to.'];
+
+    return el('div', {},
+      el('h2', { class: 'modal-title' }, heading[0]),
+      el('p', { class: 'modal-sub' }, heading[1]),
+
+      el('div', { class: 'section-label' }, 'Your PCs'),
+      listHost,
+
+      el('div', { class: 'section-label', style: { marginTop: '20px' } }, 'Add a PC with a code'),
+      el('p', { class: 'hint', style: { marginBottom: '10px' } },
+        'Open the PC Site on the machine you want to add and type its code here. ' +
+        'You only do this once — it stays on your account.'),
+      el('div', { class: 'code-entry' }, codeInput, addBtn),
+      codeProblem,
+
+      dismissable
+        ? el('div', { class: 'modal-footer' },
+            el('button', { class: 'btn btn--ghost', onClick: () => close(undefined) }, 'Cancel'))
+        : null,
+    );
+  }, { dismissable, width: '560px' });
+
+  state.pickerOpen = false;
+
+  if (chosen) {
+    selectMachine(chosen);
+    const entry = state.machines.get(chosen);
+    toast(`Connected to ${entry?.name || 'your PC'}`, 'success');
+  } else if (!state.selected) {
+    // Nothing selected and nothing chosen — the app has no PC to talk to.
+    setMode(state.mode);
+  }
+}
+
+function iconSvg(path) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.8');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  svg.innerHTML = `<path d="${path}"/>`;
+  return svg;
+}
+
+/* ── modes ───────────────────────────────────────────────────── */
+
+function setMode(mode) {
+  state.mode = mode;
+  try { localStorage.setItem(LAST_MODE_KEY, mode); } catch { /* private mode */ }
+
+  $('#paneBrowser').classList.toggle('active', mode === 'browser');
+  $('#paneControl').classList.toggle('active', mode === 'control');
+  $('#modeBrowser').classList.toggle('active', mode === 'browser');
+  $('#modeControl').classList.toggle('active', mode === 'control');
+  $('#modeBrowser').setAttribute('aria-selected', String(mode === 'browser'));
+  $('#modeControl').setAttribute('aria-selected', String(mode === 'control'));
+
+  // Leaving control mode should not leave a screen share running.
+  if (mode !== 'control') state.control?.disconnect('Switched to Browser mode.');
+}
+
+/* ── account ─────────────────────────────────────────────────── */
+
+function openAccount() {
+  const user = state.auth.currentUser;
+  return openModal((close) =>
+    el('div', {},
+      el('h2', { class: 'modal-title' }, 'Account'),
+      el('p', { class: 'modal-sub' }, user.email || 'Signed in'),
+      el('div', { class: 'notice' },
+        `${state.machines.size} PC${state.machines.size === 1 ? '' : 's'} paired to this account. ` +
+        'They follow you onto any device you sign in on.'),
+      el('div', { class: 'modal-footer' },
+        el('button', { class: 'btn btn--ghost', onClick: () => close(false) }, 'Close'),
+        el('button', {
+          class: 'btn btn--danger',
+          onClick: async () => {
+            close(false);
+            await state.control?.disconnect('Signed out.');
+            await signOut(state.auth);
+            location.replace('../');
+          },
+        }, 'Sign out'),
+      ),
+    ),
+  );
+}
+
+/* ── boot ────────────────────────────────────────────────────── */
+
+async function main() {
+  let firebase;
+  try {
+    firebase = initFirebase();
+  } catch (err) {
+    if (err instanceof MissingConfigError) { location.replace('../'); return; }
+    throw err;
+  }
+
+  state.db = firebase.db;
+  state.auth = firebase.auth;
+  await usePersistentAuth(state.auth);
+
+  const user = await waitForAuth(state.auth);
+  if (!user || user.isAnonymous) {
+    location.replace('../');
+    return;
+  }
+  state.uid = user.uid;
+  $('#accountBtn').textContent = (user.email || user.displayName || '?').slice(0, 1);
+
+  /* mini browser */
+  state.browser = createMiniBrowser({
+    db: state.db,
+    getMachineId: () => state.selected,
+    elements: {
+      frame: $('#browserFrame'),
+      stage: $('#browserStage'),
+      overlay: $('#stageOverlay'),
+      overlayTitle: $('#stageTitle'),
+      overlayMessage: $('#stageMsg'),
+      urlInput: $('#urlInput'),
+      urlLock: $('#urlLock'),
+      loadBar: $('#loadBar'),
+      backBtn: $('#navBack'),
+      forwardBtn: $('#navForward'),
+    },
+    onStatus: ({ text, bytes, ms, truncated }) => {
+      $('#statusText').textContent = truncated ? `${text} · truncated` : text;
+      $('#statusBytes').textContent = bytes != null ? formatBytes(bytes) : '';
+      $('#statusTime').textContent = ms != null ? `${ms} ms` : '';
+    },
+  });
+
+  /* control viewer */
+  state.control = createControlViewer({
+    db: state.db,
+    uid: state.uid,
+    getMachineId: () => state.selected,
+    elements: {
+      stage: $('#controlStage'),
+      video: $('#controlVideo'),
+      overlay: $('#controlOverlay'),
+      overlayTitle: $('#controlTitle'),
+      overlayMessage: $('#controlMsg'),
+      connectBtn: $('#connectControlBtn'),
+      hint: $('#captureHint'),
+    },
+    onState: ({ connected, status, rtt, fps, canInput }) => {
+      $('#controlDisconnect').disabled = !connected;
+      $('#controlCtrlAltDel').disabled = !connected || !canInput;
+      $('#controlPasteBtn').disabled = !connected || !canInput;
+
+      const dot = $('#latencyDot');
+      dot.className = 'latency-dot';
+      if (!connected) {
+        $('#latencyText').textContent = status === 'connecting' ? 'connecting…' : 'not connected';
+        return;
+      }
+      dot.classList.add(rtt == null ? '' : rtt < 60 ? 'good' : rtt < 150 ? 'fair' : 'poor');
+      const bits = [];
+      if (rtt != null) bits.push(`${rtt} ms`);
+      if (fps) bits.push(`${fps} fps`);
+      if (!canInput) bits.push('view-only');
+      $('#latencyText').textContent = bits.join(' · ') || 'connected';
+    },
+  });
+
+  /* wiring */
+  $('#modeBrowser').addEventListener('click', () => setMode('browser'));
+  $('#modeControl').addEventListener('click', () => setMode('control'));
+  $('#machinePill').addEventListener('click', () => openPicker({ reason: 'manual' }));
+  $('#accountBtn').addEventListener('click', openAccount);
+
+  $('#navGo').addEventListener('click', () => state.browser.go($('#urlInput').value));
+  $('#urlInput').addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') state.browser.go($('#urlInput').value);
+  });
+  $('#navBack').addEventListener('click', () => state.browser.back());
+  $('#navForward').addEventListener('click', () => state.browser.forward());
+  $('#navReload').addEventListener('click', () => state.browser.reload());
+
+  $('#connectControlBtn').addEventListener('click', () => state.control.connect());
+  $('#controlDisconnect').addEventListener('click', () => state.control.disconnect('You disconnected.'));
+  $('#controlCtrlAltDel').addEventListener('click', () => state.control.sendCtrlAltDel());
+  $('#controlPasteBtn').addEventListener('click', async () => {
+    const sent = await state.control.sendClipboard();
+    toast(sent ? 'Clipboard sent to the PC' : 'Could not read the clipboard', sent ? 'success' : 'danger');
+  });
+  $('#controlFullscreen').addEventListener('click', () => {
+    const stage = $('#controlStage');
+    if (document.fullscreenElement) document.exitFullscreen();
+    else stage.requestFullscreen?.().catch(() => toast('Fullscreen was refused', 'danger'));
+  });
+
+  $('#quickLinks').replaceChildren(...QUICK_LINKS.map(([label, url]) => {
+    const link = el('button', { class: 'quick-link' }, label);
+    link.addEventListener('click', () => state.browser.go(url));
+    return link;
+  }));
+
+  /* load the account's PCs, then decide whether to show the picker */
+  watchMachines();
+  const initial = await get(ref(state.db, paths.userMachines(state.uid))).catch(() => null);
+  initial?.forEach((child) => {
+    state.machines.set(child.key, { ...child.val(), id: child.key });
+    watchPresence(child.key);
+  });
+
+  let saved = null;
+  try { saved = localStorage.getItem(SELECTED_KEY); } catch { /* private mode */ }
+  try { state.mode = localStorage.getItem(LAST_MODE_KEY) || 'browser'; } catch { /* private mode */ }
+  setMode(state.mode);
+
+  $('#boot').hidden = true;
+
+  if (saved && state.machines.has(saved)) {
+    state.selected = saved;
+    renderMachinePill();
+    // Presence arrives a beat after the list; give it a moment before judging.
+    setTimeout(() => {
+      const entry = state.machines.get(saved);
+      if (!isPresenceFresh(entry?.presence)) openPicker({ reason: 'offline' });
+    }, 1500);
+  } else {
+    openPicker({ reason: 'none' });
+  }
+
+  // Deep link: /client/?go=https://example.com
+  const target = new URLSearchParams(location.search).get('go');
+  if (target) {
+    setMode('browser');
+    const url = normaliseUrl(target);
+    if (url) setTimeout(() => state.browser.go(url), 400);
+  }
+}
+
+main().catch((err) => {
+  $('#boot').hidden = true;
+  toast(`The client could not start: ${err.message}`, 'danger', 12_000);
+  console.error(err);
+});

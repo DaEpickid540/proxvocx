@@ -1,0 +1,212 @@
+/* ============================================================
+   proxvocx — root portal (choose PC site or Client site)
+   ============================================================ */
+
+.portal-page {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+}
+
+.portal-header { margin-bottom: 40px; }
+
+.portal-main {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  max-width: 720px;
+}
+
+.portal-heading {
+  font-family: var(--font-serif);
+  font-size: clamp(1.8rem, 4vw, 2.6rem);
+  font-weight: 400;
+  text-align: center;
+  margin-bottom: 8px;
+  animation: headingFade 0.4s ease both;
+}
+.portal-subheading {
+  font-size: 0.88rem;
+  color: var(--text-3);
+  text-align: center;
+  margin-bottom: 40px;
+  animation: headingFade 0.4s 0.08s ease both;
+}
+@keyframes headingFade {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.portal-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px;
+  width: 100%;
+  margin-bottom: 20px;
+}
+
+.portal-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 22px 20px 20px;
+  text-align: left;
+  position: relative;
+  overflow: hidden;
+  transition: border-color var(--tr), transform var(--tr), box-shadow var(--tr);
+  font-family: var(--font-sans);
+  animation: cardFadeUp 0.32s ease both;
+}
+.portal-card:nth-child(1) { animation-delay: 0.05s; }
+.portal-card:nth-child(2) { animation-delay: 0.12s; }
+
+@keyframes cardFadeUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.portal-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform var(--tr);
+}
+.portal-card:hover {
+  border-color: var(--accent-border);
+  transform: translateY(-3px);
+  box-shadow: 0 12px 36px rgba(0,0,0,0.45);
+}
+.portal-card:hover::before { transform: scaleX(1); }
+.portal-card:active { transform: translateY(-1px); }
+.portal-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.portal-card.loading { opacity: 0.6; pointer-events: none; }
+
+.portal-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.portal-card-icon {
+  width: 42px;
+  height: 42px;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+}
+.portal-card-icon svg { width: 20px; height: 20px; }
+
+.portal-card-arrow {
+  color: var(--text-3);
+  opacity: 0;
+  transform: translate(-4px, 4px);
+  transition: opacity var(--tr), transform var(--tr);
+}
+.portal-card:hover .portal-card-arrow { opacity: 1; transform: translate(0, 0); }
+
+.portal-card-label {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.13em;
+  color: var(--accent);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+.portal-card-title {
+  font-family: var(--font-serif);
+  font-size: 1.15rem;
+  margin-bottom: 8px;
+  line-height: 1.2;
+}
+.portal-card-desc {
+  font-size: 0.75rem;
+  color: var(--text-3);
+  line-height: 1.65;
+  margin-bottom: 20px;
+}
+.portal-card-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.portal-card-cta { font-size: 0.75rem; color: var(--text-3); font-weight: 500; }
+
+.portal-error {
+  font-size: 0.8rem;
+  color: var(--accent);
+  text-align: center;
+  background: var(--accent-bg);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--r);
+  padding: 10px 16px;
+  max-width: 600px;
+  line-height: 1.55;
+}
+
+.portal-footer { margin-top: 36px; }
+.portal-footer p {
+  font-size: 0.7rem;
+  color: var(--text-3);
+  text-align: center;
+  line-height: 1.6;
+}
+.footer-sep { margin: 0 6px; opacity: 0.5; }
+
+/* ── SIGN-IN MODAL (client role) ─────────────────────────────── */
+.auth-methods { display: flex; flex-direction: column; gap: 10px; }
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-3);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  margin: 4px 0;
+}
+.auth-divider::before,
+.auth-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.google-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 16px;
+  border-radius: var(--r);
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  font-size: 0.82rem;
+  font-weight: 500;
+  transition: border-color var(--tr), background var(--tr);
+}
+.google-btn:hover { border-color: var(--accent); }
+.google-btn svg { width: 17px; height: 17px; flex-shrink: 0; }
+
+@media (max-width: 720px) {
+  .portal-card-grid { grid-template-columns: 1fr; max-width: 420px; }
+}
+@media (max-width: 480px) {
+  .portal-page { padding: 28px 16px; }
+  .portal-header { margin-bottom: 28px; }
+  .portal-subheading { margin-bottom: 28px; }
+}

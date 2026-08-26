@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>proxvocx</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Serif+Display&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="./css/base.css">
+<link rel="stylesheet" href="./css/portal.css">
+</head>
+<body>
+
+<div class="portal-page">
+  <header class="portal-header">
+    <div class="logo">
+      <span class="logo-dot"></span>
+      <span class="logo-name">proxvocx</span>
+    </div>
+  </header>
+
+  <main class="portal-main">
+    <h1 class="portal-heading">Which end are you on?</h1>
+    <p class="portal-subheading">
+      One PC runs the connector. Every other device connects to it.
+    </p>
+
+    <div class="portal-card-grid">
+      <button class="portal-card portal-card--pc" id="pcCard" type="button">
+        <div class="portal-card-top">
+          <span class="portal-card-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/>
+            </svg>
+          </span>
+          <span class="portal-card-arrow" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M7 17 17 7M9 7h8v8"/>
+            </svg>
+          </span>
+        </div>
+        <div class="portal-card-label">Run on the PC</div>
+        <div class="portal-card-title">PC Site</div>
+        <p class="portal-card-desc">
+          The connector. Leave this open on the machine you want to reach — it
+          serves pages, shares the screen and takes input. No account needed
+          here; you pair it to yours with a code.
+        </p>
+        <div class="portal-card-footer">
+          <span class="portal-card-cta">Set up this PC &rarr;</span>
+        </div>
+      </button>
+
+      <button class="portal-card portal-card--client" id="clientCard" type="button">
+        <div class="portal-card-top">
+          <span class="portal-card-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="5" y="2" width="14" height="20" rx="2.5"/><path d="M11 18.5h2"/>
+            </svg>
+          </span>
+          <span class="portal-card-arrow" aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M7 17 17 7M9 7h8v8"/>
+            </svg>
+          </span>
+        </div>
+        <div class="portal-card-label">Use from anywhere</div>
+        <div class="portal-card-title">Client Site</div>
+        <p class="portal-card-desc">
+          Browse through your PC or take it over outright. Sign in once and
+          every PC you have paired follows your account onto any device.
+        </p>
+        <div class="portal-card-footer">
+          <span class="portal-card-cta">Sign in &rarr;</span>
+        </div>
+      </button>
+    </div>
+
+    <p class="portal-error" id="portalError" hidden></p>
+  </main>
+
+  <footer class="portal-footer">
+    <p>
+      <span id="projectLabel">not configured</span>
+      <span class="footer-sep">·</span>
+      <a href="#" id="reconfigure">Firebase settings</a>
+    </p>
+  </footer>
+</div>
+
+<div class="boot-overlay" id="boot">
+  <div class="spinner"></div>
+  <p class="boot-label">Starting up…</p>
+</div>
+
+<script type="module" src="./js/portal.js"></script>
+</body>
+</html>
