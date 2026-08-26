@@ -1,8 +1,9 @@
 /**
- * Root portal. Two doors: the PC connector (a device identity, signed in
- * anonymously — nothing to type on a machine you may be standing in front of
- * with a controller) and the client app (a real account, because that account
- * is what the PCs get permanently bound to).
+ * Root portal. Two doors: the PC connector and the client app. Both now sign
+ * in with Google and nothing else — the PC gets its own Google identity to
+ * register itself under (replacing the old anonymous device account), and a
+ * pairing code is still what actually hands a machine to an account, so a PC
+ * signed in as one person can still be paired to somebody else's.
  */
 import {
   initFirebase,
@@ -14,13 +15,9 @@ import {
   usePersistentAuth,
   waitForAuth,
   describeAuthError,
-  signInAnonymously,
-  signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
-  signInWithPopup,
-  GoogleAuthProvider,
+  signInWithGoogle,
 } from './firebase.js';
-import { $, el, openModal, toast, setBusy } from './ui.js';
+import { $, el, openModal, toast } from './ui.js';
 
 const boot = $('#boot');
 const errorBox = $('#portalError');
@@ -74,8 +71,8 @@ function configModal({ dismissable = true } = {}) {
         'Your apps → Web app. It is kept in this browser only.'),
       textarea,
       el('p', { class: 'hint', style: { marginTop: '10px' } },
-        'Enable Anonymous sign-in for the PC connector, plus Email/Password or ' +
-        'Google for the client. Publish database.rules.json before pairing.'),
+        'Enable Google as a sign-in method under Authentication → Sign-in method. ' +
+        'Publish database.rules.json before pairing.'),
       problem,
       el('div', { class: 'modal-footer' },
         existing
@@ -91,68 +88,30 @@ function configModal({ dismissable = true } = {}) {
   }, { dismissable });
 }
 
-/* ── Client sign-in ──────────────────────────────────────────── */
+/* ── Google sign-in ──────────────────────────────────────────── */
 
-function signInModal(auth) {
+function signInModal(auth, { title, subtitle }) {
   return openModal((close) => {
-    const email = el('input', { class: 'text-input', type: 'email', placeholder: 'you@example.com', autocomplete: 'email' });
-    const password = el('input', { class: 'text-input', type: 'password', placeholder: 'Password', autocomplete: 'current-password' });
     const problem = el('p', { class: 'notice notice--danger', hidden: true });
-
-    const fail = (err) => {
-      problem.textContent = describeAuthError(err);
-      problem.hidden = false;
-    };
-
-    const submit = el('button', { class: 'btn btn--primary btn--full' }, 'Sign in');
-    const register = el('button', { class: 'btn btn--ghost btn--full' }, 'Create an account');
-
-    const withEmail = async (fn, button, label) => {
-      problem.hidden = true;
-      if (!email.value.trim() || !password.value) {
-        problem.textContent = 'Enter an email address and a password.';
-        problem.hidden = false;
-        return;
-      }
-      setBusy(button, true, label);
-      try {
-        const cred = await fn(auth, email.value.trim(), password.value);
-        close(cred.user);
-      } catch (err) {
-        fail(err);
-        setBusy(button, false);
-      }
-    };
-
-    submit.addEventListener('click', () => withEmail(signInWithEmailAndPassword, submit, 'Signing in…'));
-    register.addEventListener('click', () => withEmail(createUserWithEmailAndPassword, register, 'Creating…'));
-    password.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit.click(); });
 
     const google = el('button', { class: 'google-btn' }, googleMark(), 'Continue with Google');
     google.addEventListener('click', async () => {
       problem.hidden = true;
+      google.disabled = true;
       try {
-        const cred = await signInWithPopup(auth, new GoogleAuthProvider());
+        const cred = await signInWithGoogle(auth);
         close(cred.user);
       } catch (err) {
-        fail(err);
+        problem.textContent = describeAuthError(err);
+        problem.hidden = false;
+        google.disabled = false;
       }
     });
 
     return el('div', {},
-      el('h2', { class: 'modal-title' }, 'Sign in to the client'),
-      el('p', { class: 'modal-sub' },
-        'Your paired PCs live on this account, so signing in on a new device is ' +
-        'all it takes to reach them again.'),
-      el('div', { class: 'auth-methods' },
-        google,
-        el('div', { class: 'auth-divider' }, 'or'),
-        el('div', { class: 'field' }, el('span', { class: 'field-label' }, 'Email'), email),
-        el('div', { class: 'field' }, el('span', { class: 'field-label' }, 'Password'), password),
-        problem,
-        submit,
-        register,
-      ),
+      el('h2', { class: 'modal-title' }, title),
+      el('p', { class: 'modal-sub' }, subtitle),
+      el('div', { class: 'auth-methods' }, google, problem),
     );
   });
 }
@@ -180,12 +139,13 @@ async function main() {
   const user = await waitForAuth(auth);
   boot.hidden = true;
 
-  // Already signed in? Skip straight past the door they came through last time.
-  if (user) {
-    const target = user.isAnonymous ? './pc/' : './client/';
-    const card = user.isAnonymous ? $('#pcCard') : $('#clientCard');
+  // Already signed in? Both doors lead to the same Google session now, so
+  // either card can jump straight through — offer the one used last.
+  const lastRole = localStorage.getItem('proxvocx.lastRole');
+  if (user && lastRole) {
+    const card = $(lastRole === 'pc' ? '#pcCard' : '#clientCard');
     card.querySelector('.portal-card-cta').textContent =
-      user.isAnonymous ? 'Resume this PC →' : `Continue as ${user.email || 'your account'} →`;
+      `Continue as ${user.displayName || user.email || 'your account'} →`;
   }
 
   $('#reconfigure').addEventListener('click', (event) => {
@@ -193,33 +153,35 @@ async function main() {
     configModal();
   });
 
-  $('#pcCard').addEventListener('click', async () => {
-    const card = $('#pcCard');
-    card.classList.add('loading');
+  const enterAs = async (role, destination) => {
     showError('');
-    try {
-      if (!auth.currentUser?.isAnonymous) {
-        await signInAnonymously(auth);
-      }
-      location.href = './pc/';
-    } catch (err) {
-      card.classList.remove('loading');
-      showError(describeAuthError(err));
-    }
-  });
-
-  $('#clientCard').addEventListener('click', async () => {
-    showError('');
-    if (auth.currentUser && !auth.currentUser.isAnonymous) {
-      location.href = './client/';
+    localStorage.setItem('proxvocx.lastRole', role);
+    if (auth.currentUser) {
+      location.href = destination;
       return;
     }
-    const signedIn = await signInModal(auth);
+    const copy = role === 'pc'
+      ? {
+          title: 'Sign in this PC',
+          subtitle:
+            'This gives the PC its own Google identity to register under. It does ' +
+            'not have to be the same account you pair it to afterwards.',
+        }
+      : {
+          title: 'Sign in to the client',
+          subtitle:
+            'Your paired PCs live on this account, so signing in on a new device is ' +
+            'all it takes to reach them again.',
+        };
+    const signedIn = await signInModal(auth, copy);
     if (signedIn) {
       toast('Signed in', 'success');
-      location.href = './client/';
+      location.href = destination;
     }
-  });
+  };
+
+  $('#pcCard').addEventListener('click', () => enterAs('pc', './pc/'));
+  $('#clientCard').addEventListener('click', () => enterAs('client', './client/'));
 }
 
 main().catch((err) => {

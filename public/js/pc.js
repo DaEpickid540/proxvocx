@@ -11,8 +11,8 @@ import {
   MissingConfigError,
   usePersistentAuth,
   waitForAuth,
-  signInAnonymously,
-  signOut,
+  signInWithGoogle,
+  describeAuthError,
   ref,
   get,
   set,
@@ -515,6 +515,39 @@ async function startPresence() {
   });
 }
 
+/* ── sign-in gate ────────────────────────────────────────────── */
+
+/**
+ * There is no anonymous fallback any more, and `signInWithPopup` needs a
+ * genuine user gesture — so boot stalls here, showing a button, until
+ * somebody actually clicks it.
+ */
+function signInGate() {
+  $('#bootSpinner').hidden = true;
+  $('#bootLabel').hidden = true;
+  $('#signInGate').hidden = false;
+
+  return new Promise((resolve) => {
+    $('#pcGoogleBtn').addEventListener('click', async () => {
+      const button = $('#pcGoogleBtn');
+      const error = $('#signInError');
+      error.hidden = true;
+      button.disabled = true;
+      try {
+        const cred = await signInWithGoogle(state.auth);
+        $('#signInGate').hidden = true;
+        $('#bootSpinner').hidden = false;
+        $('#bootLabel').hidden = false;
+        resolve(cred.user);
+      } catch (err) {
+        error.textContent = describeAuthError(err);
+        error.hidden = false;
+        button.disabled = false;
+      }
+    });
+  });
+}
+
 /* ── boot ────────────────────────────────────────────────────── */
 
 async function main() {
@@ -538,16 +571,9 @@ async function main() {
   state.auth = firebase.auth;
   await usePersistentAuth(state.auth);
 
-  $('#bootLabel').textContent = 'Signing in as a device…';
-  let user = await waitForAuth(state.auth);
-  if (!user) {
-    user = (await signInAnonymously(state.auth)).user;
-  } else if (!user.isAnonymous) {
-    // Somebody opened the connector on a browser already signed in as a
-    // client. The PC needs its own identity, so swap to one.
-    await signOut(state.auth);
-    user = (await signInAnonymously(state.auth)).user;
-  }
+  $('#bootLabel').textContent = 'Checking sign-in…';
+  const restored = await waitForAuth(state.auth);
+  await (restored ? Promise.resolve(restored) : signInGate());
 
   await hostBridge.probe();
 

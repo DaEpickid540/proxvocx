@@ -12,7 +12,7 @@
  *
  * plus the usual desktop furniture: a tray icon, run-at-login, single instance.
  */
-import { app, BrowserWindow, ipcMain, desktopCapturer, screen, Tray, Menu, nativeImage, shell, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, desktopCapturer, screen, Tray, Menu, nativeImage, shell, dialog, session } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -48,6 +48,28 @@ let staticServer = null;
 let quitting = false;
 /** Bounds of the display currently being shared, in real desktop pixels. */
 let activeDisplayBounds = null;
+
+/**
+ * Google's OAuth consent screen hard-refuses any user agent that contains an
+ * "Electron/" token ("disallowed_useragent") — it does not matter how recent
+ * the underlying Chromium is. Sign-in is the one Google-only auth method this
+ * app has, so this is not optional: strip the token everywhere Chromium would
+ * otherwise send it, both for the main window and the OAuth popup it opens.
+ */
+const CHROME_LIKE_USER_AGENT = process.versions.chrome
+  ? `Mozilla/5.0 (${process.platform === 'win32' ? 'Windows NT 10.0; Win64; x64' : process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7' : 'X11; Linux x86_64'}) ` +
+    `AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome} Safari/537.36`
+  : undefined;
+
+/** Google's own consent flow and Firebase's redirect-back page for it. */
+function isAuthPopupUrl(url) {
+  try {
+    const host = new URL(url).host;
+    return host === 'accounts.google.com' || /\.firebaseapp\.com$/.test(host);
+  } catch {
+    return false;
+  }
+}
 
 /* ── persistent store ────────────────────────────────────────── */
 
@@ -93,15 +115,34 @@ async function createWindow() {
     ? new URL('pc/', process.env.PROXVOCX_SITE_URL).toString()
     : `${staticServer.origin}/pc/`;
 
+  if (CHROME_LIKE_USER_AGENT) mainWindow.webContents.setUserAgent(CHROME_LIKE_USER_AGENT);
+
   log.info(`loading connector from ${target}`);
   await mainWindow.loadURL(target);
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
 
-  // External links open in the real browser, never inside the connector.
+  // Google's sign-in popup has to open as a real Electron window sharing this
+  // one's session, or the OAuth callback can never post its result back to
+  // the page that opened it. Everything else opens in the real browser instead.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isAuthPopupUrl(url)) {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          width: 480,
+          height: 640,
+          autoHideMenuBar: true,
+          webPreferences: { contextIsolation: true, nodeIntegration: false },
+        },
+      };
+    }
     shell.openExternal(url);
     return { action: 'deny' };
+  });
+
+  mainWindow.webContents.on('did-create-window', (popup) => {
+    if (CHROME_LIKE_USER_AGENT) popup.webContents.setUserAgent(CHROME_LIKE_USER_AGENT);
   });
 
   // Closing the window keeps the connector running in the tray — the whole
@@ -230,6 +271,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     try {
+      if (CHROME_LIKE_USER_AGENT) session.defaultSession.setUserAgent(CHROME_LIKE_USER_AGENT);
       staticServer = await startStaticServer(PUBLIC_DIR);
       registerIpc();
       createTray();

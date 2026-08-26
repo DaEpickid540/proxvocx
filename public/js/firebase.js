@@ -8,9 +8,6 @@ import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.5/fireba
 import {
   getAuth,
   onAuthStateChanged,
-  signInAnonymously,
-  signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
   signInWithPopup,
   GoogleAuthProvider,
   setPersistence,
@@ -43,9 +40,13 @@ export {
   onValue, onChildAdded, onChildRemoved, onDisconnect,
   serverTimestamp, query, orderByChild, limitToLast,
   onAuthStateChanged, signOut,
-  signInAnonymously, signInWithEmailAndPassword, createUserWithEmailAndPassword,
   signInWithPopup, GoogleAuthProvider,
 };
+
+/** The only sign-in method this app offers, anywhere. */
+export function signInWithGoogle(auth) {
+  return signInWithPopup(auth, new GoogleAuthProvider());
+}
 
 const STORAGE_KEY = 'proxvocx.firebaseConfig';
 const REQUIRED_KEYS = ['apiKey', 'authDomain', 'databaseURL', 'projectId', 'appId'];
@@ -169,21 +170,13 @@ export function waitForAuth(auth) {
 export function describeAuthError(err) {
   const code = err?.code || '';
   const map = {
-    'auth/invalid-email': 'That email address is not valid.',
-    'auth/user-disabled': 'That account has been disabled.',
-    'auth/user-not-found': 'No account exists for that email.',
-    'auth/wrong-password': 'Wrong email or password.',
-    'auth/invalid-credential': 'Wrong email or password.',
-    'auth/email-already-in-use': 'An account already exists for that email.',
-    'auth/weak-password': 'Pick a password of at least 6 characters.',
     'auth/popup-closed-by-user': 'The Google sign-in window was closed.',
     'auth/popup-blocked': 'Your browser blocked the Google sign-in popup.',
+    'auth/cancelled-popup-request': 'Another sign-in was already in progress.',
     'auth/unauthorized-domain':
       'This domain is not in the Firebase authorised-domains list. Add it under Authentication → Settings.',
     'auth/operation-not-allowed':
-      'That sign-in method is not enabled for this Firebase project.',
-    'auth/admin-restricted-operation':
-      'Anonymous sign-in is not enabled for this Firebase project — enable it under Authentication → Sign-in method.',
+      'Google sign-in is not enabled for this Firebase project — enable it under Authentication → Sign-in method.',
     'auth/network-request-failed': 'Could not reach Firebase. Check the network.',
   };
   return map[code] || err?.message || 'Something went wrong.';

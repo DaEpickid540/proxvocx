@@ -338,7 +338,7 @@ async function main() {
   await usePersistentAuth(state.auth);
 
   const user = await waitForAuth(state.auth);
-  if (!user || user.isAnonymous) {
+  if (!user) {
     location.replace('../');
     return;
   }

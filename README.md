@@ -45,8 +45,9 @@ thing on the PC, and the client side needs no install at all.
 
 No codes to re-enter, no per-device setup:
 
-1. The PC registers itself under an anonymous *device* identity and shows an
-   8-character code.
+1. The PC signs in with its own Google account (any account — it does not
+   have to be yours) to get a stable *device* identity, registers itself, and
+   shows an 8-character code.
 2. You sign in on the client, type the code, and the PC stamps your account
    onto itself as `ownerUid`.
 3. The machine now lives under `users/{yourUid}/machines`, so **any** device
@@ -111,9 +112,9 @@ listed or enumerated. Knowing the code is the secret.
 1. <https://console.firebase.google.com> → **Add project**. Analytics not needed.
 2. **Build → Realtime Database → Create Database.** Start in locked mode; the
    rules in this repo replace the defaults.
-3. **Build → Authentication → Get started.** Enable:
-   - **Anonymous** — the PC's device identity. Required.
-   - **Email/Password** and/or **Google** — the client account.
+3. **Build → Authentication → Get started.** Enable **Google** and only Google —
+   it is the one sign-in method the app offers, for both the PC and the
+   client. Leave Email/Password and Anonymous off.
 4. **Project settings → General → Your apps → Web app (`</>`)**. Copy the
    `firebaseConfig` object.
 
