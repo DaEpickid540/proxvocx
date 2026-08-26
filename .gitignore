@@ -2,6 +2,9 @@ node_modules/
 dist/
 out/
 
+# Firebase CLI's local deploy cache — hashes and history, not config.
+.firebase/
+
 # The desktop app keeps its machine identity and settings in userData, not here.
 connector.json
 

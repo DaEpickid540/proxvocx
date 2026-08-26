@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "default": "personal-suite-ca587"
+  },
+  "targets": {
+    "personal-suite-ca587": {
+      "hosting": {
+        "proxvocx": [
+          "proxvocx"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}
