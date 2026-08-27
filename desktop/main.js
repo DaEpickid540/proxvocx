@@ -24,7 +24,7 @@ import { injectInput, inputAvailable, inputStatus } from './bridge/input.js';
 import { startStaticServer, packagedPublicDir } from './bridge/static-server.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const PUBLIC_DIR = packagedPublicDir(import.meta.url);
+const PUBLIC_DIR = packagedPublicDir();
 
 const FETCH_CONFIG = {
   requestTimeoutMs: Number(process.env.PROXVOCX_TIMEOUT_MS) || 20_000,

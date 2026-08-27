@@ -70,5 +70,11 @@ export function startStaticServer(rootDir, { host = '127.0.0.1', port = 0 } = {}
   });
 }
 
-export const packagedPublicDir = (metaUrl) =>
-  path.resolve(path.dirname(fileURLToPath(metaUrl)), '..', '..', 'public');
+/**
+ * `public/` relative to *this file's own* location (desktop/bridge/), not the
+ * caller's — a caller-supplied `import.meta.url` is one level shallower for
+ * anything in desktop/ directly, and silently walking past the repo root
+ * turns every request into a 404 instead of an obvious error.
+ */
+export const packagedPublicDir = () =>
+  path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'public');
