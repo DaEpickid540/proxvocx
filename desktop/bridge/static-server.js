@@ -1,10 +1,13 @@
 /**
- * Serves the packaged `public/` tree on 127.0.0.1.
+ * Serves the packaged `public/` tree on http://localhost.
  *
- * The PC page is loaded over http://localhost rather than file:// for two
- * reasons: Firebase lists `localhost` as an authorised domain out of the box,
- * and `file://` origins are opaque, which breaks auth persistence and the
- * Web Crypto calls the pairing code generator relies on.
+ * The PC page is loaded over http://localhost rather than file:// or
+ * 127.0.0.1 for two reasons: Firebase's authorised-domains list contains the
+ * literal string `localhost` out of the box — `127.0.0.1` is a *different*
+ * domain as far as that check is concerned, even though it is the same
+ * loopback interface, and gets `auth/unauthorized-domain` rejected. `file://`
+ * origins are opaque, which breaks auth persistence and the Web Crypto calls
+ * the pairing code generator relies on.
  *
  * It also means the desktop app works with no Firebase Hosting deploy at all —
  * hosting is only needed for the client side.
@@ -25,7 +28,7 @@ const MIME = {
   '.woff2': 'font/woff2',
 };
 
-export function startStaticServer(rootDir, { host = '127.0.0.1', port = 0 } = {}) {
+export function startStaticServer(rootDir, { host = 'localhost', port = 0 } = {}) {
   const root = path.resolve(rootDir);
 
   const server = http.createServer((req, res) => {
