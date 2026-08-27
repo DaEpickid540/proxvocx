@@ -3,8 +3,9 @@
  *
  * The same code drives the Firebase-hosted page and the desktop app's window;
  * `hostBridge` is the only thing that knows the difference. Its job:
- * register this machine, keep presence fresh, get itself paired to exactly one
- * account, and then serve that account's proxy requests and control sessions.
+ * register this machine, keep presence fresh, get itself paired to one or
+ * more accounts (several Google accounts can share the same PC), and then
+ * serve those accounts' proxy requests and sessions.
  */
 import {
   initFirebase,
@@ -12,6 +13,7 @@ import {
   usePersistentAuth,
   waitForAuth,
   signInWithGoogle,
+  signOut,
   describeAuthError,
   ref,
   get,
@@ -45,7 +47,7 @@ const state = {
   auth: null,
   machineId: null,
   machineName: 'This PC',
-  ownerUid: null,
+  owners: {},  // uid -> true, for every account this PC is paired to
   settings: { ...DEFAULT_SETTINGS },
   stats: { requests: 0, bytes: 0, sessions: 0, errors: 0 },
   proxy: null,
@@ -174,16 +176,21 @@ async function enterPairingMode() {
   await issueCode();
 }
 
-async function issueCode() {
+/**
+ * Publishes one code and watches for it to be claimed, writing progress into
+ * whatever `codeEl`/`countdownEl` are handed in — the dedicated unpaired
+ * panel and the "add another account" modal are the same flow pointed at
+ * different DOM.
+ */
+async function runPairingFlow({ codeEl, countdownEl, onPaired, onError }) {
   clearInterval(countdownTimer);
   if (state.pairing) {
     state.pairing.stop();
     await revokePairingCode(state.db, state.pairing.code);
   }
 
-  const codeNode = $('#pairCode');
-  codeNode.classList.remove('expired');
-  codeNode.textContent = '••••-••••';
+  codeEl.classList.remove('expired');
+  codeEl.textContent = '••••-••••';
 
   let published;
   try {
@@ -194,12 +201,12 @@ async function issueCode() {
     });
   } catch (err) {
     log(`could not publish a pairing code: ${err.message}`, 'error');
-    $('#pairCountdown').textContent = 'Could not reach Firebase.';
+    countdownEl.textContent = 'Could not reach Firebase.';
     return;
   }
 
-  codeNode.textContent = formatPairingCode(published.code);
-  log(`pairing code ready, valid for 5 minutes`);
+  codeEl.textContent = formatPairingCode(published.code);
+  log('pairing code ready, valid for 5 minutes');
 
   const stop = watchForClaim(state.db, {
     machineId: state.machineId,
@@ -207,10 +214,13 @@ async function issueCode() {
     onPaired: (uid) => {
       clearInterval(countdownTimer);
       state.pairing = null;
-      toast('Paired', 'success');
       log(`paired to account ${uid.slice(0, 8)}…`, 'good');
+      onPaired?.(uid);
     },
-    onError: (err) => log(`pairing failed: ${err.message}`, 'error'),
+    onError: (err) => {
+      log(`pairing failed: ${err.message}`, 'error');
+      onError?.(err);
+    },
   });
   state.pairing = { code: published.code, stop };
 
@@ -218,20 +228,71 @@ async function issueCode() {
     const left = published.expiresAt - Date.now();
     if (left <= 0) {
       clearInterval(countdownTimer);
-      codeNode.classList.add('expired');
-      $('#pairCountdown').innerHTML = 'This code has expired.';
+      codeEl.classList.add('expired');
+      countdownEl.innerHTML = 'This code has expired.';
       return;
     }
     const mins = Math.floor(left / 60000);
     const secs = Math.floor((left % 60000) / 1000);
-    $('#pairCountdown').innerHTML =
+    countdownEl.innerHTML =
       `Expires in <strong>${mins}:${String(secs).padStart(2, '0')}</strong>`;
   }, 500);
 }
 
+function issueCode() {
+  return runPairingFlow({
+    codeEl: $('#pairCode'),
+    countdownEl: $('#pairCountdown'),
+    onPaired: () => toast('Paired', 'success'),
+  });
+}
+
+/** Lets an already-paired PC add a second (or third) Google account. */
+function openAddAccountModal() {
+  return openModal((close) => {
+    const codeEl = el('div', { class: 'pair-code' }, '••••-••••');
+    const countdownEl = el('p', { class: 'pair-countdown' }, 'Publishing a code…');
+
+    runPairingFlow({
+      codeEl,
+      countdownEl,
+      onPaired: (uid) => {
+        toast('Account added', 'success');
+        close(uid);
+      },
+    });
+
+    const copyBtn = el('button', { class: 'btn btn--ghost btn--sm' }, 'Copy');
+    copyBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(codeEl.textContent);
+        toast('Code copied', 'success');
+      } catch {
+        toast('Could not reach the clipboard', 'danger');
+      }
+    });
+
+    return el('div', {},
+      el('h2', { class: 'modal-title' }, 'Add another account'),
+      el('p', { class: 'modal-sub' },
+        'Sign in on the client with the Google account you want to add, choose ' +
+        '“Add a PC with a code”, and type this in. Both accounts keep working afterwards.'),
+      codeEl,
+      countdownEl,
+      el('div', { class: 'row', style: { justifyContent: 'center', marginTop: '14px' } }, copyBtn),
+    );
+  }, { dismissable: true }).finally(() => {
+    if (state.pairing) {
+      state.pairing.stop();
+      revokePairingCode(state.db, state.pairing.code);
+      state.pairing = null;
+    }
+  });
+}
+
 /* ── paired mode ─────────────────────────────────────────────── */
 
-function enterPairedMode(ownerUid) {
+function enterPairedMode() {
   clearInterval(countdownTimer);
   if (state.pairing) {
     state.pairing.stop();
@@ -246,8 +307,8 @@ function enterPairedMode(ownerUid) {
 
   $('#machineName').textContent = state.machineName;
   $('#machineIdText').textContent = state.machineId;
-  $('#ownerText').textContent = ownerUid;
   $('#deviceText').textContent = state.auth.currentUser.uid;
+  renderOwnerList();
 
   setStatus('Online · waiting for the client', 'live');
   renderStats();
@@ -300,8 +361,36 @@ function renderSessions() {
       ? 'A client is connected to this PC.'
       : `${count} clients are connected to this PC.`;
     setStatus('Online · session active', 'live');
-  } else if (state.ownerUid) {
+  } else if (Object.keys(state.owners).length) {
     setStatus('Online · waiting for the client', 'live');
+  }
+}
+
+function renderOwnerList() {
+  const uids = Object.keys(state.owners);
+  $('#ownerList').replaceChildren(...uids.map((uid) => {
+    const revokeBtn = el('button', { class: 'btn btn--xs', title: 'Revoke this account' }, 'Revoke');
+    revokeBtn.addEventListener('click', () => revokeOwner(uid));
+    return el('div', { class: 'row', style: { justifyContent: 'space-between' } },
+      el('span', { class: 'owner-val mono', style: { fontSize: '0.72rem' } }, uid),
+      revokeBtn,
+    );
+  }));
+}
+
+async function revokeOwner(uid) {
+  const sure = await confirmModal({
+    title: 'Revoke this account?',
+    message: 'That account loses access to this PC immediately.',
+    confirmLabel: 'Revoke',
+    danger: true,
+  });
+  if (!sure) return;
+  try {
+    await remove(ref(state.db, paths.owner(state.machineId, uid)));
+    toast('Access revoked', 'info');
+  } catch (err) {
+    toast(`Could not revoke: ${err.message}`, 'danger');
   }
 }
 
@@ -371,19 +460,40 @@ async function openSettings() {
       persistSettings();
     });
 
-    const unpair = el('button', { class: 'btn btn--danger btn--full' }, 'Unpair this PC');
+    const unpair = el('button', { class: 'btn btn--danger btn--full' }, 'Unpair this PC (revoke everyone)');
     unpair.addEventListener('click', async () => {
       const sure = await confirmModal({
         title: 'Unpair this PC?',
         message:
-          'The paired account loses access immediately and this machine goes back to ' +
-          'showing a pairing code. You will need to pair it again from the client.',
-        confirmLabel: 'Unpair',
+          `Every account with access (${Object.keys(state.owners).length}) loses it immediately, ` +
+          'and this machine goes back to showing a pairing code. To remove just one account, use ' +
+          'the Revoke button next to it on the main screen instead.',
+        confirmLabel: 'Unpair everyone',
         danger: true,
       });
       if (!sure) return;
       close(false);
       await unpairSelf();
+    });
+
+    const signOutBtn = el('button', { class: 'btn btn--ghost btn--full' }, 'Sign out of this PC');
+    signOutBtn.addEventListener('click', async () => {
+      const sure = await confirmModal({
+        title: 'Sign out of this PC?',
+        message:
+          'This PC keeps a Google identity of its own, separate from the accounts paired to it. ' +
+          'Signing out means signing back in — with the same or a different Google account — before ' +
+          'this connector can do anything. If you sign back in with a different account, this becomes ' +
+          'a brand new machine and needs pairing again; the paired accounts stay exactly as they are.',
+        confirmLabel: 'Sign out',
+        danger: true,
+      });
+      if (!sure) return;
+      close(false);
+      state.control?.endAll('signing out of this PC');
+      state.scripted?.endAll('signing out of this PC');
+      await signOut(state.auth);
+      location.reload();
     });
 
     return el('div', {},
@@ -424,7 +534,8 @@ async function openSettings() {
       hostBridge.isDesktop ? autoLaunchRow() : null,
 
       el('div', { class: 'section-label', style: { marginTop: '18px' } }, 'Danger zone'),
-      state.ownerUid ? unpair : el('p', { class: 'hint' }, 'This PC is not paired yet.'),
+      Object.keys(state.owners).length ? unpair : el('p', { class: 'hint' }, 'This PC is not paired yet.'),
+      signOutBtn,
 
       el('div', { class: 'modal-footer' },
         el('button', { class: 'btn btn--ghost', onClick: () => close(false) }, 'Close'),
@@ -486,7 +597,7 @@ function currentCapabilities() {
 
 async function unpairSelf() {
   try {
-    await remove(ref(state.db, paths.ownerUid(state.machineId)));
+    await remove(ref(state.db, paths.owners(state.machineId)));
     state.control?.endAll('the PC was unpaired');
     state.scripted?.endAll('the PC was unpaired');
     log('unpaired', 'warn');
@@ -513,23 +624,37 @@ async function registerMachine() {
   }
 
   if (!snapshot?.exists()) {
-    await set(machineRef, {
-      deviceUid: uid,
-      meta: {
-        name: state.machineName,
-        platform: hostBridge.platform,
-        appVersion: hostBridge.version || 'web',
-        createdAt: Date.now(),
-      },
-    });
-    log('registered this machine');
+    try {
+      await set(machineRef, {
+        deviceUid: uid,
+        meta: {
+          name: state.machineName,
+          platform: hostBridge.platform,
+          appVersion: hostBridge.version || 'web',
+          createdAt: Date.now(),
+        },
+      });
+      log('registered this machine');
+    } catch (err) {
+      // A read denied by the rules looks identical to "does not exist yet"
+      // from here — the get() above cannot tell "brand new id" from "this id
+      // belongs to a different identity" (e.g. a stale id from before
+      // Google-only auth, whose deviceUid can never sign in again). If the
+      // create-write also fails, it is the latter: the node really does
+      // exist server-side, just not under this identity. Stop fighting the
+      // rules for a name that is not ours and mint a fresh one instead.
+      log(`could not claim machine id ${state.machineId} (${err.code || err.message}) — it belongs to a different identity, generating a new one`, 'warn');
+      state.machineId = generateMachineId();
+      await hostBridge.saveStore({ machineId: state.machineId });
+      return registerMachine();
+    }
   } else {
     await update(ref(state.db, paths.machineMeta(state.machineId)), {
       name: state.machineName,
       platform: hostBridge.platform,
       appVersion: hostBridge.version || 'web',
     });
-    state.ownerUid = snapshot.val().ownerUid || null;
+    state.owners = snapshot.val().owners || {};
     const storedName = snapshot.val().meta?.name;
     if (storedName) state.machineName = storedName;
   }
@@ -632,18 +757,24 @@ async function main() {
   $('#boot').hidden = true;
   log(`connector up as ${state.machineName}`, 'good');
 
-  // Ownership drives the whole UI: unpaired shows a code, paired starts work.
-  onValue(ref(state.db, paths.ownerUid(state.machineId)), (snapshot) => {
-    const ownerUid = snapshot.val() || null;
-    if (ownerUid === state.ownerUid && ownerUid) return;
-    state.ownerUid = ownerUid;
-    if (ownerUid) enterPairedMode(ownerUid);
-    else enterPairingMode();
+  // Ownership drives the whole UI: nobody paired shows a code, at least one
+  // owner starts work. The set can change shape after that too — adding or
+  // revoking an account — without ever leaving paired mode.
+  onValue(ref(state.db, paths.owners(state.machineId)), (snapshot) => {
+    const owners = snapshot.val() || {};
+    const wasEmpty = Object.keys(state.owners).length === 0;
+    const isEmpty = Object.keys(owners).length === 0;
+    state.owners = owners;
+
+    if (isEmpty) enterPairingMode();
+    else if (wasEmpty) enterPairedMode();
+    else renderOwnerList();
   }, (err) => log(`ownership watch failed: ${err.message}`, 'error'));
 
   /* controls */
   $('#settingsBtn').addEventListener('click', openSettings);
   $('#newCodeBtn').addEventListener('click', () => issueCode());
+  $('#addAccountBtn').addEventListener('click', () => openAddAccountModal());
   $('#copyCodeBtn').addEventListener('click', async () => {
     if (!state.pairing) return;
     try {

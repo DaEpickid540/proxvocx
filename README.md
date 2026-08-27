@@ -41,17 +41,24 @@ So the native host is not optional if you want the product — a web page
 genuinely cannot inject input or bypass CORS. But you only install **one**
 thing on the PC, and the client side needs no install at all.
 
-## Pairing happens once, ever
+## Pairing happens once, ever — and more than one account can share a PC
 
 No codes to re-enter, no per-device setup:
 
 1. The PC signs in with its own Google account (any account — it does not
    have to be yours) to get a stable *device* identity, registers itself, and
    shows an 8-character code.
-2. You sign in on the client, type the code, and the PC stamps your account
-   onto itself as `ownerUid`.
+2. You sign in on the client, type the code, and the PC adds your account to
+   `machines/{id}/owners`.
 3. The machine now lives under `users/{yourUid}/machines`, so **any** device
    you sign into that account on sees it immediately.
+
+`owners` is a set, not a single slot — a personal Google account and a work
+one (or anyone else's) can both reach the same PC. From the PC's Connection
+card, **Add another account** publishes a fresh code the same way; whoever
+claims it is *added*, not swapped in. Each account can be revoked
+individually from that same card, and "Unpair this PC" in Settings clears
+everyone at once.
 
 Codes are 30<sup>8</sup> ≈ 6.6 × 10<sup>11</sup>, live five minutes, and are
 single-use. The alphabet has no `0`, `1`, `I`, `L`, `O` or `U`, so a code read
@@ -91,7 +98,8 @@ off a screen and typed on a phone cannot be misread.
 ```
 machines/{machineId}
   deviceUid   uid of the PC installation      written once, by the PC
-  ownerUid    uid of the paired account       written by the PC, at pairing
+  owners      { uid: true, ... }              every account paired to this PC,
+                                               added (never replaced) by the PC at pairing
   meta        { name, platform, appVersion, createdAt }
   presence    { online, lastSeen, capabilities: { proxy, control, input, scripts } }
   requests/{id}    owner writes, PC drains        ← Browser mode (script-free)

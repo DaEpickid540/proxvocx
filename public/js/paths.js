@@ -4,12 +4,13 @@
  *
  *   machines/{machineId}
  *     meta        { name, platform, appVersion, createdAt }
- *     deviceUid   uid of the PC's own (anonymous) device account — written once
- *     ownerUid    uid of the account that paired it — written once, by the PC
- *     presence    { online, lastSeen, capabilities: { proxy, control, input } }
- *     requests/{requestId}    owner writes, PC reads and deletes
- *     responses/{requestId}   PC writes, owner reads and deletes
- *     sessions/{sessionId}    WebRTC signalling for PC Control
+ *     deviceUid   uid of the PC's own Google device account — written once
+ *     owners      { uid: true, ... } — every account paired to this PC;
+ *                 several Google accounts can share one machine
+ *     presence    { online, lastSeen, capabilities: { proxy, control, input, scripts } }
+ *     requests/{requestId}    any owner writes, PC reads and deletes
+ *     responses/{requestId}   PC writes, that owner reads and deletes
+ *     sessions/{sessionId}    WebRTC signalling for PC Control / scripted Browser mode
  *
  *   users/{uid}/machines/{machineId}   { name, pairedAt }
  *
@@ -20,7 +21,8 @@ export const paths = {
   machine:      (m) => `machines/${m}`,
   machineMeta:  (m) => `machines/${m}/meta`,
   deviceUid:    (m) => `machines/${m}/deviceUid`,
-  ownerUid:     (m) => `machines/${m}/ownerUid`,
+  owners:       (m) => `machines/${m}/owners`,
+  owner:        (m, uid) => `machines/${m}/owners/${uid}`,
   presence:     (m) => `machines/${m}/presence`,
 
   requests:     (m) => `machines/${m}/requests`,

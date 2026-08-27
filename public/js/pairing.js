@@ -1,11 +1,16 @@
 /**
- * One-time pairing that becomes permanent.
+ * One-time pairing that becomes permanent — and can be repeated to add a
+ * second (or third) account to the same PC, since ownership is a set, not a
+ * single slot.
  *
  * The PC publishes a short-lived code at `pairing/{code}`. A signed-in client
  * that knows the code stamps its uid onto that node. The PC — the only party
- * the rules trust to do so — then writes `machines/{id}/ownerUid` and burns
- * the code. From then on the machine appears under `users/{uid}/machines` on
- * *every* device that account signs in on, so the code is never needed again.
+ * the rules trust to do so — then *adds* that uid to `machines/{id}/owners`
+ * (never replacing whoever was already there) and burns the code. From then
+ * on the machine appears under `users/{uid}/machines` on *every* device that
+ * account signs in on, so the code is never needed again for that account.
+ * Issuing a fresh code and having a different Google account claim it is how
+ * a second account gets added to the same PC.
  *
  *   PC                          Firebase                    client
  *   ──                          ────────                    ──────
@@ -13,9 +18,9 @@
  *                                                    ◀────── get pairing/{code}
  *                                pairing/{code}      ◀────── set claimedBy=uid
  *   onValue claimedBy    ◀──────
- *   set machines/{id}/ownerUid
+ *   set machines/{id}/owners/{uid}=true
  *   remove pairing/{code}
- *                                machines/{id}       ──────▶ onValue ownerUid
+ *                                machines/{id}       ──────▶ onValue owners/{uid}
  *                                                            set users/{uid}/machines/{id}
  */
 import { ref, get, set, update, remove, onValue } from './firebase.js';
@@ -59,7 +64,7 @@ export function watchForClaim(db, { machineId, code, onPaired, onError }) {
     done = true;
     stop();
     try {
-      await set(ref(db, paths.ownerUid(machineId)), value.claimedBy);
+      await set(ref(db, paths.owner(machineId, value.claimedBy)), true);
       await remove(ref(db, paths.pairing(code)));
       onPaired?.(value.claimedBy);
     } catch (err) {
@@ -135,25 +140,25 @@ function waitForOwnership(db, machineId, uid, timeoutMs) {
     }, timeoutMs);
 
     stop = onValue(
-      ref(db, paths.ownerUid(machineId)),
+      ref(db, paths.owner(machineId, uid)),
       (snapshot) => {
-        if (snapshot.val() !== uid) return;
+        if (snapshot.val() !== true) return;
         clearTimeout(timer);
         stop();
         resolve();
       },
       () => {
-        /* Until ownerUid is ours the rules deny the read, which surfaces here
-           as a permission error. Keep waiting — the retry below re-subscribes. */
+        /* Until this uid is an owner the rules deny the read, which surfaces
+           here as a permission error. Keep waiting — the retry below re-subscribes. */
       },
     );
 
     // The first subscribe usually fails the rules check, so poll gently until
-    // the PC has stamped ownership and the read is permitted.
+    // the PC has added this uid and the read is permitted.
     const poll = setInterval(async () => {
       try {
-        const snap = await get(ref(db, paths.ownerUid(machineId)));
-        if (snap.val() === uid) {
+        const snap = await get(ref(db, paths.owner(machineId, uid)));
+        if (snap.val() === true) {
           clearInterval(poll);
           clearTimeout(timer);
           stop();

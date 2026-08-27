@@ -1,17 +1,19 @@
 {
   "rules": {
     // ── machines ────────────────────────────────────────────────────────
-    // Two principals per machine: the PC's own device account (deviceUid,
-    // a Google identity that belongs to the installation, not necessarily
-    // the same account it ends up paired to) and the user account it has
-    // been paired to (ownerUid). Nobody else sees anything.
+    // Two kinds of principal per machine: the PC's own device account
+    // (deviceUid, a Google identity that belongs to the installation, not
+    // necessarily the same account it ends up paired to) and any number of
+    // user accounts it has been paired to (owners/{uid}: true) — several
+    // Google accounts can share one PC, e.g. a personal and a work account
+    // both reaching the same machine. Nobody else sees anything.
     //
     // Note that in Realtime Database a child .write can only *widen* access,
-    // never narrow it — so the broad grant here is the device only, and the
+    // never narrow it — so the broad grant here is the device only, and each
     // owner is granted exactly the subtrees it needs further down.
     "machines": {
       "$machineId": {
-        ".read": "auth != null && (data.child('deviceUid').val() === auth.uid || data.child('ownerUid').val() === auth.uid)",
+        ".read": "auth != null && (data.child('deviceUid').val() === auth.uid || data.child('owners').child(auth.uid).val() === true)",
         ".write": "auth != null && ((!data.exists() && newData.child('deviceUid').val() === auth.uid) || data.child('deviceUid').val() === auth.uid)",
 
         "deviceUid": {
@@ -22,10 +24,11 @@
           ".validate": "newData.isString() && newData.val() === auth.uid && !data.exists() && auth.token.firebase.sign_in_provider === 'google.com'"
         },
 
-        "ownerUid": {
-          // Only the PC stamps ownership, and only after it has seen a valid
-          // claim on its pairing code. Removing it is how the PC unpairs.
-          ".validate": "!newData.exists() || (newData.isString() && newData.val().length > 0)"
+        "owners": {
+          // Only the PC adds an entry, and only after it has seen a valid
+          // claim on its own pairing code. Removing an entry (or the whole
+          // map) is how the PC revokes one account, or everyone at once.
+          "$uid": { ".validate": "newData.isBoolean()" }
         },
 
         "meta": {
@@ -53,7 +56,7 @@
         // The owner enqueues; the PC (covered by the grant above) drains.
         "requests": {
           "$requestId": {
-            ".write": "auth != null && root.child('machines/' + $machineId + '/ownerUid').val() === auth.uid",
+            ".write": "auth != null && root.child('machines/' + $machineId + '/owners/' + auth.uid).val() === true",
             ".validate": "newData.hasChildren(['url', 'createdAt'])",
             "url": {
               ".validate": "newData.isString() && newData.val().length <= 2048 && newData.val().matches(/^https?:\\/\\//i)"
@@ -73,7 +76,7 @@
         // read rule) and delete them once displayed, but never forge one.
         "responses": {
           "$requestId": {
-            ".write": "auth != null && root.child('machines/' + $machineId + '/ownerUid').val() === auth.uid && !newData.exists()"
+            ".write": "auth != null && root.child('machines/' + $machineId + '/owners/' + auth.uid).val() === true && !newData.exists()"
           }
         },
 
@@ -86,7 +89,7 @@
         // with JavaScript turned on) and carries that starting URL along.
         "sessions": {
           "$sessionId": {
-            ".write": "auth != null && root.child('machines/' + $machineId + '/ownerUid').val() === auth.uid",
+            ".write": "auth != null && root.child('machines/' + $machineId + '/owners/' + auth.uid).val() === true",
             "clientUid": { ".validate": "newData.isString()" },
             "mode":      { ".validate": "newData.val() === 'control' || newData.val() === 'scripted'" },
             "url":       { ".validate": "newData.isString() && newData.val().length <= 2048 && newData.val().matches(/^https?:\\/\\//i)" },
@@ -120,7 +123,7 @@
         ".write": "auth != null && auth.uid === $uid && auth.token.firebase.sign_in_provider === 'google.com'",
         "machines": {
           "$machineId": {
-            ".validate": "!newData.exists() || root.child('machines/' + $machineId + '/ownerUid').val() === $uid",
+            ".validate": "!newData.exists() || root.child('machines/' + $machineId + '/owners/' + $uid).val() === true",
             "name":     { ".validate": "newData.isString() && newData.val().length <= 64" },
             "pairedAt": { ".validate": "newData.isNumber()" },
             "$other": { ".validate": false }

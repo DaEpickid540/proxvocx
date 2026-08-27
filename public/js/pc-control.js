@@ -44,8 +44,8 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
   async function accept(sessionId, session) {
     const settings = getSettings?.() || {};
 
-    const ownerSnap = await get(ref(db, paths.ownerUid(machineId)));
-    if (!ownerSnap.exists() || ownerSnap.val() !== session.clientUid) {
+    const ownerSnap = await get(ref(db, paths.owner(machineId, session.clientUid)));
+    if (ownerSnap.val() !== true) {
       log?.('refused a session from an account this PC is not paired to', 'warn');
       await remove(ref(db, paths.session(machineId, sessionId)));
       return;
