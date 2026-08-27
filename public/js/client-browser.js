@@ -17,6 +17,9 @@ import { formatBytes } from './ui.js';
 /** Subresources are individually proxied; keep a lid on the round trips. */
 const MAX_SUBRESOURCES = 40;
 const SUBRESOURCE_CONCURRENCY = 6;
+/** Background images and @font-face sources inside one stylesheet blob. */
+const MAX_CSS_URLS = 24;
+const CSS_URL_CONCURRENCY = 4;
 
 /**
  * `request` is injectable so the rewriting pipeline can be exercised without a
@@ -127,14 +130,15 @@ export function createMiniBrowser({ db, getMachineId, elements, onStatus, reques
 
     const html = responseText(response);
     const doc = new DOMParser().parseFromString(html, 'text/html');
-    const subresources = prepareDocument(doc, finalUrl);
+    const { pending, inlineStyles } = prepareDocument(doc, finalUrl);
 
     const live = await writeDocument(`<!doctype html>${doc.documentElement.outerHTML}`);
     stage.dataset.state = 'ready';
 
     attachInterceptors(finalUrl, live);
     // Deliberately not awaited: the page is readable before its images land.
-    hydrateSubresources(subresources, live).catch(() => {});
+    hydrateSubresources(pending, live).catch(() => {});
+    hydrateInlineStyles(inlineStyles, finalUrl, live).catch(() => {});
   }
 
   /**
@@ -202,15 +206,28 @@ export function createMiniBrowser({ db, getMachineId, elements, onStatus, reques
     }
     for (const frameNode of doc.querySelectorAll('iframe, frame')) frameNode.remove();
 
-    // Inline styles can still reach out for fonts and images; neutralise the
-    // remote references so the page does not leak this device's IP.
+    // Inline styles can reach out for background images and web fonts too.
+    // Blank them before this ever reaches the iframe — the browser fetches a
+    // CSS url() on its own, sandbox or not, so leaving the real one in even
+    // briefly would let this device's IP leak straight to the target site.
+    // The original text is kept here, off to the side, and patched back in
+    // wholesale once the async hydration pass has fetched each reference
+    // through the proxy.
+    const inlineStyles = [];
+    let styleIndex = 0;
     for (const style of doc.querySelectorAll('style')) {
-      style.textContent = neutraliseCss(style.textContent);
+      const original = style.textContent;
+      style.textContent = blankCssUrls(original);
+      if (/url\(/i.test(original)) {
+        const id = `s${styleIndex++}`;
+        style.dataset.proxyStyleId = id;
+        inlineStyles.push({ id, original });
+      }
     }
 
     doc.head?.prepend(viewportMeta(doc));
     doc.head?.prepend(baseStyles(doc));
-    return pending;
+    return { pending, inlineStyles };
   }
 
   /** Pulls the tagged images and stylesheets through the proxy, in a pool. */
@@ -237,9 +254,11 @@ export function createMiniBrowser({ db, getMachineId, elements, onStatus, reques
               img.src = responseDataUrl(response);
             }
           } else {
+            const css = await rewriteCssUrls(responseText(response), item.url, machineId);
+            if (frame.contentDocument !== doc) return; // navigated away mid-fetch
             for (const link of doc.querySelectorAll(`link[data-proxy-style="${cssEscape(item.url)}"]`)) {
               const style = doc.createElement('style');
-              style.textContent = neutraliseCss(responseText(response));
+              style.textContent = css;
               link.replaceWith(style);
             }
           }
@@ -252,6 +271,74 @@ export function createMiniBrowser({ db, getMachineId, elements, onStatus, reques
     await Promise.all(
       Array.from({ length: Math.min(SUBRESOURCE_CONCURRENCY, pending.length) }, worker),
     );
+  }
+
+  /** Same idea as hydrateSubresources, but for the background/font url()s in inline <style> blocks. */
+  async function hydrateInlineStyles(inlineStyles, baseUrl, doc) {
+    const machineId = getMachineId();
+    if (!machineId || !inlineStyles?.length || !doc) return;
+
+    await Promise.all(inlineStyles.map(async ({ id, original }) => {
+      const css = await rewriteCssUrls(original, baseUrl, machineId);
+      if (frame.contentDocument !== doc) return; // navigated away mid-fetch
+      const style = doc.querySelector(`style[data-proxy-style-id="${cssEscape(id)}"]`);
+      if (style) style.textContent = css;
+    }));
+  }
+
+  /**
+   * Fetches every background-image / @font-face url() in one CSS blob through
+   * the proxy and returns the CSS with each one swapped for the data: URI
+   * that came back (or blanked, if it failed) — a single pass over the
+   * *original* text, so there is never an intermediate DOM state holding a
+   * real, fetchable remote URL.
+   */
+  async function rewriteCssUrls(cssText, baseUrl, machineId) {
+    if (!cssText) return '';
+    // Imports are unsupported and dropped outright — strip them before
+    // scanning for url()s, or an `@import url(...)` gets fetched as though
+    // it were a background image only to have the whole rule thrown away.
+    const withoutImports = cssText.replace(/@import[^;]+;/gi, '');
+    if (!machineId) return blankCssUrls(withoutImports);
+
+    const matches = [];
+    const seen = new Set();
+    let m;
+    CSS_URL_RE.lastIndex = 0;
+    while ((m = CSS_URL_RE.exec(withoutImports)) && matches.length < MAX_CSS_URLS) {
+      const raw = m[2].trim();
+      if (!raw || seen.has(raw)) continue;
+      const resolved = resolve(raw, baseUrl);
+      if (!resolved) continue;
+      seen.add(raw);
+      matches.push({ raw, resolved });
+    }
+    if (!matches.length) return blankCssUrls(withoutImports);
+
+    const results = new Map();
+    let index = 0;
+    const worker = async () => {
+      while (index < matches.length) {
+        const item = matches[index];
+        index += 1;
+        try {
+          const response = await fetchPage(machineId, {
+            url: item.resolved,
+            method: 'GET',
+            headers: { accept: '*/*' },
+          }, { timeoutMs: 20_000 });
+          results.set(item.raw, responseDataUrl(response));
+        } catch {
+          results.set(item.raw, '');
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CSS_URL_CONCURRENCY, matches.length) }, worker));
+
+    return withoutImports.replace(CSS_URL_RE, (full, quote, raw) => {
+      const value = results.get(raw.trim());
+      return `url("${value || ''}")`;
+    });
   }
 
   /* ── in-frame interception ─────────────────────────────────── */
@@ -462,15 +549,21 @@ function resolve(href, baseUrl) {
 }
 
 /**
- * Removes remote fetches from CSS so the page cannot phone home. Background
- * images and web fonts would each need their own proxy round trip, which is
- * not worth it — the declarations are kept valid but inert.
+ * Matches a CSS `url(...)` value, excluding ones already inlined as `data:`.
+ * Group 2 is the raw, unquoted URL text; the `\1` backreference keeps a
+ * quoted value's closing quote matched to its opener.
  */
-function neutraliseCss(css) {
+const CSS_URL_RE = /url\(\s*(['"]?)(?!data:)([^'")]+)\1\s*\)/gi;
+
+/**
+ * Removes remote fetches from CSS so the page cannot phone home before an
+ * async rewrite has had a chance to fetch them through the proxy — used both
+ * as the synchronous pass before anything reaches the iframe, and as the
+ * fallback when there is no PC to fetch through at all.
+ */
+function blankCssUrls(css) {
   if (!css) return '';
-  return css
-    .replace(/@import[^;]+;/gi, '')
-    .replace(/url\(\s*['"]?(?!data:)[^)'"]+['"]?\s*\)/gi, 'url("")');
+  return css.replace(/@import[^;]+;/gi, '').replace(CSS_URL_RE, 'url("")');
 }
 
 function viewportMeta(doc) {
