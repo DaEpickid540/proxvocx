@@ -35,4 +35,28 @@ contextBridge.exposeInMainWorld('proxvocx', {
 
   /** Tells main which display input events should land on. */
   setActiveDisplay: (displayId) => ipcRenderer.send('proxvocx:activeDisplay', displayId),
+
+  /**
+   * A real, scripted browser tab running on the PC for one 'scripted'
+   * session — Browser mode with JavaScript turned on. Frames and navigation
+   * state arrive as events rather than return values, since they change
+   * continuously for as long as the session is open.
+   */
+  scriptedOpen: (opts) => ipcRenderer.invoke('proxvocx:scriptedOpen', opts),
+  scriptedNavigate: (sessionId, action, url) =>
+    ipcRenderer.send('proxvocx:scriptedNavigate', { sessionId, action, url }),
+  scriptedInput: (sessionId, inputEvent) =>
+    ipcRenderer.send('proxvocx:scriptedInput', { sessionId, inputEvent }),
+  scriptedClose: (sessionId) => ipcRenderer.send('proxvocx:scriptedClose', { sessionId }),
+
+  onScriptedFrame: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('proxvocx:scriptedFrame', listener);
+    return () => ipcRenderer.removeListener('proxvocx:scriptedFrame', listener);
+  },
+  onScriptedNavState: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('proxvocx:scriptedNavState', listener);
+    return () => ipcRenderer.removeListener('proxvocx:scriptedNavState', listener);
+  },
 });

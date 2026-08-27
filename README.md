@@ -70,16 +70,19 @@ off a screen and typed on a phone cannot be misread.
 | `public/js/host-bridge.js` | The seam between the page and its host |
 | `public/js/pc-proxy.js` | Connector: drains the request queue |
 | `public/js/pc-control.js` | Connector: serves screen + replays input |
+| `public/js/pc-scripted-browser.js` | Connector: serves a real, JS-enabled browser tab |
 | `public/js/proxy-client.js` | Client: enqueue a request, await the response |
-| `public/js/client-browser.js` | The mini browser and its HTML rewriter |
+| `public/js/client-browser.js` | The script-free mini browser and its HTML rewriter |
 | `public/js/client-control.js` | The remote desktop viewer |
+| `public/js/client-scripted-browser.js` | The viewer for a real, scripted browser tab |
 | `public/js/signaling.js` | WebRTC handshake over RTDB |
-| `public/js/input-protocol.js` | The input wire format, shared by both ends |
+| `public/js/input-protocol.js` | The input (and nav command) wire format |
 | `desktop/main.js` | Electron main: IPC, tray, run-at-login |
 | `desktop/preload.cjs` | The only Electron surface the page can see |
 | `desktop/bridge/fetcher.js` | The proxy fetch, with redirect re-validation |
 | `desktop/bridge/safe-url.js` | SSRF guard (blocks private/loopback space) |
-| `desktop/bridge/input.js` | Mouse/keyboard synthesis (optional native dep) |
+| `desktop/bridge/input.js` | Mouse/keyboard synthesis for PC Control (optional native dep) |
+| `desktop/bridge/scripted-browser.js` | Runs the real, offscreen browser tab for scripted Browser mode |
 | `desktop/bridge/static-server.js` | Serves the packaged page on localhost |
 | `database.rules.json` | The rules that actually enforce all of the above |
 
@@ -90,10 +93,12 @@ machines/{machineId}
   deviceUid   uid of the PC installation      written once, by the PC
   ownerUid    uid of the paired account       written by the PC, at pairing
   meta        { name, platform, appVersion, createdAt }
-  presence    { online, lastSeen, capabilities: { proxy, control, input } }
-  requests/{id}    owner writes, PC drains        ← Browser mode
-  responses/{id}   PC writes, owner reads+deletes ← Browser mode
-  sessions/{id}    { offer, answer, ice }         ← PC Control handshake only
+  presence    { online, lastSeen, capabilities: { proxy, control, input, scripts } }
+  requests/{id}    owner writes, PC drains        ← Browser mode (script-free)
+  responses/{id}   PC writes, owner reads+deletes ← Browser mode (script-free)
+  sessions/{id}    { mode, url?, offer, answer, ice } ← handshake only, for
+                                                        both PC Control and
+                                                        scripted Browser mode
 
 users/{uid}/machines/{machineId}   { name, pairedAt }
 
@@ -194,7 +199,7 @@ picker appears; type the code showing on the PC. That is the last time you will
 see a code on this account.
 
 - **Browser mode** — type a URL. The PC fetches it and the page renders in a
-  sandboxed iframe.
+  sandboxed iframe (or a live, real browser tab — see below).
 - **PC Control mode** — hit Connect. Click into the picture to send input,
   press <kbd>Esc</kbd> to give the keyboard back.
 
@@ -202,18 +207,50 @@ The picker returns by itself whenever the selected PC drops offline.
 
 ## What Browser mode can and cannot do
 
-The rendered document runs in an iframe **without `allow-scripts`**. Nothing
-from the remote site ever executes on your device. That is a deliberate trade:
+Browser mode has two entirely different engines, and which one runs is a
+setting on the PC (Settings → "Allow JavaScript in Browser mode", **off by
+default**):
+
+**Off (the default) — script-free page rewriter.** The fetched HTML is
+rewritten and rendered in a `srcdoc` iframe **without `allow-scripts`**.
+Nothing from the remote site ever executes on your device — a deliberate
+trade:
 
 - ✅ Static pages, articles, docs, search results, forms (GET and POST)
-- ✅ Links, back/forward, images and stylesheets (proxied individually)
+- ✅ Links, back/forward, images, stylesheets, background images and web fonts
+  (all individually proxied — nothing is fetched by your device directly)
 - ❌ Anything that needs JavaScript — SPAs, infinite scroll, most logins
-- ❌ Video, websockets, service workers
-- ❌ CSS background images and web fonts (neutralised rather than fetched)
+- ❌ Video, WebSockets, service workers
 
 Navigation is driven from the parent page, which can reach into the `srcdoc`
 iframe because it inherits the origin. Links and form submissions are
 intercepted and replayed through the proxy instead of hitting the network.
+
+**On — a real, scripted browser tab, streamed to you.** There is no way to
+reconstruct arbitrary JS-driven network behaviour (fetch, XHR, live sockets)
+in a client-side sandboxed iframe without rebuilding a general-purpose relay
+for every browser network primitive. Instead the PC opens the page in a real,
+offscreen Electron/Chromium window — full JavaScript, full WebSockets,
+because it is a genuine browser, not a reconstruction — and streams its
+picture to you over WebRTC exactly the way PC Control streams a desktop, just
+scoped to one browser tab instead of the whole screen. Your clicks, scrolls,
+and keystrokes forward back over the same data channel, and the real
+browser's URL, title, and back/forward state push back to your URL bar as
+they change (a page can navigate itself from a click inside the video, not
+only from the URL bar).
+
+This costs more than the text-proxy engine — it is a live video stream per
+session rather than a lightweight fetch-and-rewrite — and it is why the
+setting defaults off. Turning it on also means every site you browse to runs
+untrusted, fully capable JavaScript on the PC's own machine and network; that
+is the whole point (full compatibility), but it is a materially larger trust
+boundary than the sandboxed default, which is why it is opt-in rather than
+automatic. The client shows a one-time notice when it lands on a PC with the
+setting off, explaining what turning it on would get you.
+
+One thing scripted mode still cannot do: a live multiplayer game or anything
+else needing a *direct* socket from your own device is out of scope no matter
+what — the PC is genuinely the one browsing, so the socket lives there too.
 
 ## Operational notes
 

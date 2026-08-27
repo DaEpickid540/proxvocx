@@ -26,10 +26,12 @@ import { publishPairingCode, revokePairingCode, watchForClaim } from './pairing.
 import { hostBridge } from './host-bridge.js';
 import { startProxyServer } from './pc-proxy.js';
 import { startControlHost } from './pc-control.js';
+import { startScriptedBrowserHost } from './pc-scripted-browser.js';
 import { $, el, openModal, toast, confirmModal, formatBytes } from './ui.js';
 
 const DEFAULT_SETTINGS = {
   allowControl: true,
+  allowScripts: false,
   allowInput: true,
   allowProxy: true,
   maxHeight: 1080,
@@ -48,6 +50,7 @@ const state = {
   stats: { requests: 0, bytes: 0, sessions: 0, errors: 0 },
   proxy: null,
   control: null,
+  scripted: null,
   pairing: null,
   heartbeat: null,
 };
@@ -129,6 +132,16 @@ function renderCapabilities() {
         : state.settings.allowInput
           ? 'Mouse and keyboard will be replayed on this desktop.'
           : 'View-only: input is switched off in settings.',
+    },
+    {
+      ok: caps.scripts && state.settings.allowScripts,
+      warn: caps.scripts && !state.settings.allowScripts,
+      name: 'Scripted Browser mode',
+      detail: !caps.scripts
+        ? 'Needs the desktop app — a plain browser tab cannot run a second real browser.'
+        : state.settings.allowScripts
+          ? 'Browser mode opens a real, scripted tab on this PC — full JavaScript and WebSockets.'
+          : 'Off by default. Browser mode falls back to a script-free page render.',
     },
   ];
 
@@ -263,15 +276,29 @@ function enterPairedMode(ownerUid) {
     });
     log('listening for control sessions', 'good');
   }
+
+  if (!state.scripted) {
+    state.scripted = startScriptedBrowserHost({
+      db: state.db,
+      machineId: state.machineId,
+      bridge: hostBridge,
+      log,
+      onStat: bumpStat,
+      getSettings: () => state.settings,
+      onSessionChange: renderSessions,
+    });
+    log('listening for scripted browser sessions', 'good');
+  }
 }
 
-function renderSessions(sessions) {
+function renderSessions() {
+  const count = (state.control?.sessions.length || 0) + (state.scripted?.sessions.length || 0);
   const banner = $('#liveBanner');
-  banner.hidden = sessions.length === 0;
-  if (sessions.length) {
-    $('#liveText').textContent = sessions.length === 1
+  banner.hidden = count === 0;
+  if (count) {
+    $('#liveText').textContent = count === 1
       ? 'A client is connected to this PC.'
-      : `${sessions.length} clients are connected to this PC.`;
+      : `${count} clients are connected to this PC.`;
     setStatus('Online · session active', 'live');
   } else if (state.ownerUid) {
     setStatus('Online · waiting for the client', 'live');
@@ -302,6 +329,9 @@ async function openSettings() {
         renderCapabilities();
         if (key === 'allowControl' && !state.settings[key]) {
           state.control?.endAll('remote control was switched off');
+        }
+        if (key === 'allowScripts' && !state.settings[key]) {
+          state.scripted?.endAll('JavaScript was switched off for Browser mode');
         }
       });
       return el('div', { class: 'toggle-row' },
@@ -372,6 +402,12 @@ async function openSettings() {
         'Let the paired account view this screen.', hostBridge.capabilities.capture),
       toggle('allowInput', 'Allow remote input',
         'Replay mouse and keyboard. Off means view-only.', hostBridge.capabilities.input),
+
+      el('div', { class: 'section-label', style: { marginTop: '18px' } }, 'Browser mode'),
+      toggle('allowScripts', 'Allow JavaScript in Browser mode',
+        'Opens a real, scripted browser tab on this PC instead of a script-free page render — ' +
+        'full JavaScript and WebSockets, at the cost of it no longer being a lightweight text proxy. ' +
+        'Off by default.', hostBridge.capabilities.scripts),
 
       el('div', { class: 'section-label', style: { marginTop: '18px' } }, 'Screen'),
       el('div', { class: 'field' },
@@ -444,6 +480,7 @@ function currentCapabilities() {
     proxy: !!(caps.proxy && state.settings.allowProxy),
     control: !!(caps.capture && state.settings.allowControl),
     input: !!(caps.input && state.settings.allowInput),
+    scripts: !!(caps.scripts && state.settings.allowScripts),
   };
 }
 
@@ -451,6 +488,7 @@ async function unpairSelf() {
   try {
     await remove(ref(state.db, paths.ownerUid(state.machineId)));
     state.control?.endAll('the PC was unpaired');
+    state.scripted?.endAll('the PC was unpaired');
     log('unpaired', 'warn');
     toast('This PC is no longer paired', 'info');
   } catch (err) {
@@ -615,7 +653,10 @@ async function main() {
       toast('Could not reach the clipboard', 'danger');
     }
   });
-  $('#endSessionBtn').addEventListener('click', () => state.control?.endAll('ended on the PC'));
+  $('#endSessionBtn').addEventListener('click', () => {
+    state.control?.endAll('ended on the PC');
+    state.scripted?.endAll('ended on the PC');
+  });
   $('#clearLogBtn').addEventListener('click', () => logHost.replaceChildren());
   $('#resetStatsBtn').addEventListener('click', () => {
     state.stats = { requests: 0, bytes: 0, sessions: 0, errors: 0 };

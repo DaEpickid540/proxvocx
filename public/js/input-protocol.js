@@ -35,6 +35,26 @@ export const text = (value) => ({ t: 'x', v: String(value).slice(0, 4096) });
 /** Clipboard push from viewer to host. */
 export const clipboard = (value) => ({ t: 'c', v: String(value).slice(0, 100_000) });
 
+/**
+ * Navigation commands for a 'scripted' session — the PC is driving a real
+ * browser tab, and these are exactly the controls a URL bar and back/forward
+ * buttons need. Sent over the same data channel as input, since it is
+ * already the one live channel between the two peers.
+ */
+export const navGo = (url) => ({ t: 'n', a: 'go', url: String(url).slice(0, 2048) });
+export const navBack = () => ({ t: 'n', a: 'back' });
+export const navForward = () => ({ t: 'n', a: 'forward' });
+export const navReload = () => ({ t: 'n', a: 'reload' });
+
+/**
+ * Host → client only: the real browser's navigation state, pushed whenever it
+ * changes so the viewer's URL bar and back/forward buttons reflect reality —
+ * a real page can navigate on its own from a click inside the video, not
+ * just from the URL bar.
+ */
+export const navState = ({ url, title, canGoBack, canGoForward, loading }) =>
+  ({ t: 'ns', url, title: String(title || '').slice(0, 200), canGoBack: !!canGoBack, canGoForward: !!canGoForward, loading: !!loading });
+
 export const MOD = { ctrl: 1, alt: 2, shift: 4, meta: 8 };
 
 export function modifierMask(event) {
@@ -69,6 +89,9 @@ export function isValidEvent(event) {
     case 'x':
     case 'c':
       return typeof event.v === 'string';
+    case 'n':
+      if (event.a === 'go') return typeof event.url === 'string' && /^https?:\/\//i.test(event.url);
+      return ['back', 'forward', 'reload'].includes(event.a);
     default:
       return false;
   }

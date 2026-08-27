@@ -120,6 +120,14 @@ body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; 
 .browser-stage[data-state="empty"] .browser-frame,
 .browser-stage[data-state="loading"] .browser-frame { visibility: hidden; }
 
+/* Scripted mode swaps the iframe for a live video of a real browser tab. */
+.browser-frame--scripted {
+  background: #000;
+  object-fit: contain;
+  outline: none;
+}
+.browser-stage[data-state="connecting"] .browser-frame--scripted { visibility: hidden; }
+
 .stage-overlay {
   position: absolute;
   inset: 0;

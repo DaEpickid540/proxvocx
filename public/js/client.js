@@ -22,6 +22,7 @@ import { paths, isPresenceFresh, formatPairingCode } from './paths.js';
 import { claimPairingCode, unpairMachine, PairingError } from './pairing.js';
 import { createMiniBrowser, normaliseUrl } from './client-browser.js';
 import { createControlViewer } from './client-control.js';
+import { createScriptedBrowserViewer } from './client-scripted-browser.js';
 import { $, el, openModal, toast, confirmModal, formatBytes, formatRelative, setBusy } from './ui.js';
 
 const SELECTED_KEY = 'proxvocx.selectedMachine';
@@ -42,10 +43,65 @@ const state = {
   selected: null,
   mode: 'browser',
   browser: null,
+  scriptedBrowser: null,
   control: null,
   presenceWatchers: new Map(),
   pickerOpen: false,
+  scriptsActive: false,       // which Browser-mode engine is currently live
+  notifiedNoScripts: new Set(), // machineIds already told "JS isn't enabled" this load
 };
+
+/** Whichever Browser-mode engine is currently backing the shared UI. */
+function activeBrowser() {
+  return state.scriptsActive ? state.scriptedBrowser : state.browser;
+}
+
+/**
+ * Browser mode has two entirely different engines sharing one screen: the
+ * script-free DOM rewriter (client-browser.js) and a real, scripted browser
+ * tab on the PC (client-scripted-browser.js). Which one is live depends on
+ * the selected machine's own "Allow JavaScript" setting, surfaced as
+ * presence.capabilities.scripts — never assumed, always read fresh, since a
+ * PC's setting can change mid-session.
+ */
+function syncBrowserEngine() {
+  const entry = state.selected ? state.machines.get(state.selected) : null;
+  const scriptsOn = !!(isPresenceFresh(entry?.presence) && entry.presence.capabilities?.scripts);
+
+  if (scriptsOn === state.scriptsActive) return;
+
+  // Swapping engines mid-session tears down whichever one was live — the two
+  // never run at once, and the one going idle has no business holding a
+  // WebRTC session or a proxy fetch open in the background.
+  state.browser?.reset();
+  state.scriptedBrowser?.reset();
+
+  state.scriptsActive = scriptsOn;
+  $('#browserFrame').hidden = scriptsOn;
+  $('#browserVideo').hidden = !scriptsOn;
+
+  if (!scriptsOn && entry && state.mode === 'browser' && !state.notifiedNoScripts.has(state.selected)) {
+    state.notifiedNoScripts.add(state.selected);
+    noScriptsModal(entry.name);
+  }
+}
+
+function noScriptsModal(machineName) {
+  return openModal((close) =>
+    el('div', {},
+      el('h2', { class: 'modal-title' }, 'JavaScript isn’t enabled'),
+      el('p', { class: 'modal-sub' },
+        `${machineName || 'This PC'} is running Browser mode without JavaScript. Pages render as ` +
+        'plain, static markup — fine for articles and simple sites, but games, most modern web ' +
+        'apps, and anything that needs a live connection will not work.'),
+      el('p', { class: 'hint', style: { marginBottom: '16px' } },
+        'Turn on “Allow JavaScript in Browser mode” in the connector’s settings on the PC ' +
+        'for a real, fully scripted browser tab instead — full JavaScript, full WebSockets.'),
+      el('div', { class: 'modal-footer' },
+        el('button', { class: 'btn btn--primary', onClick: () => close() }, 'Got it')),
+    ),
+  );
+}
 
 /* ── machine list ────────────────────────────────────────────── */
 
@@ -88,6 +144,7 @@ function watchPresence(machineId) {
       toast(`${entry.name} went offline`, 'danger');
       openPicker({ reason: 'offline' });
     }
+    if (state.selected === machineId) syncBrowserEngine();
   }, () => { /* denied means unpaired on the PC side; the list watch handles it */ });
   state.presenceWatchers.set(machineId, stop);
 }
@@ -108,8 +165,10 @@ function selectMachine(machineId) {
   } catch { /* private mode */ }
 
   state.browser?.reset();
+  state.scriptedBrowser?.reset();
   state.control?.reset();
   renderMachinePill();
+  syncBrowserEngine();
 }
 
 function renderMachinePill() {
@@ -293,6 +352,7 @@ function setMode(mode) {
 
   // Leaving control mode should not leave a screen share running.
   if (mode !== 'control') state.control?.disconnect('Switched to Browser mode.');
+  if (mode === 'browser') syncBrowserEngine();
 }
 
 /* ── account ─────────────────────────────────────────────────── */
@@ -313,6 +373,7 @@ function openAccount() {
           onClick: async () => {
             close(false);
             await state.control?.disconnect('Signed out.');
+            await state.scriptedBrowser?.reset();
             await signOut(state.auth);
             location.replace('../');
           },
@@ -386,6 +447,31 @@ async function main() {
     },
   });
 
+  /* scripted browser viewer — the other Browser-mode engine, sharing the
+     same URL bar / back / forward / stage / overlay elements */
+  state.scriptedBrowser = createScriptedBrowserViewer({
+    db: state.db,
+    uid: state.uid,
+    getMachineId: () => state.selected,
+    elements: {
+      video: $('#browserVideo'),
+      stage: $('#browserStage'),
+      overlay: $('#stageOverlay'),
+      overlayTitle: $('#stageTitle'),
+      overlayMessage: $('#stageMsg'),
+      urlInput: $('#urlInput'),
+      urlLock: $('#urlLock'),
+      loadBar: $('#loadBar'),
+      backBtn: $('#navBack'),
+      forwardBtn: $('#navForward'),
+    },
+    onStatus: ({ text }) => {
+      $('#statusText').textContent = text;
+      $('#statusBytes').textContent = '';
+      $('#statusTime').textContent = '';
+    },
+  });
+
   /* control viewer */
   state.control = createControlViewer({
     db: state.db,
@@ -426,13 +512,13 @@ async function main() {
   $('#machinePill').addEventListener('click', () => openPicker({ reason: 'manual' }));
   $('#accountBtn').addEventListener('click', openAccount);
 
-  $('#navGo').addEventListener('click', () => state.browser.go($('#urlInput').value));
+  $('#navGo').addEventListener('click', () => activeBrowser().go($('#urlInput').value));
   $('#urlInput').addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') state.browser.go($('#urlInput').value);
+    if (event.key === 'Enter') activeBrowser().go($('#urlInput').value);
   });
-  $('#navBack').addEventListener('click', () => state.browser.back());
-  $('#navForward').addEventListener('click', () => state.browser.forward());
-  $('#navReload').addEventListener('click', () => state.browser.reload());
+  $('#navBack').addEventListener('click', () => activeBrowser().back());
+  $('#navForward').addEventListener('click', () => activeBrowser().forward());
+  $('#navReload').addEventListener('click', () => activeBrowser().reload());
 
   $('#connectControlBtn').addEventListener('click', () => state.control.connect());
   $('#controlDisconnect').addEventListener('click', () => state.control.disconnect('You disconnected.'));
@@ -449,7 +535,7 @@ async function main() {
 
   $('#quickLinks').replaceChildren(...QUICK_LINKS.map(([label, url]) => {
     const link = el('button', { class: 'quick-link' }, label);
-    link.addEventListener('click', () => state.browser.go(url));
+    link.addEventListener('click', () => activeBrowser().go(url));
     return link;
   }));
 
@@ -471,10 +557,12 @@ async function main() {
   if (saved && state.machines.has(saved)) {
     state.selected = saved;
     renderMachinePill();
+    syncBrowserEngine();
     // Presence arrives a beat after the list; give it a moment before judging.
     setTimeout(() => {
       const entry = state.machines.get(saved);
       if (!isPresenceFresh(entry?.presence)) openPicker({ reason: 'offline' });
+      else syncBrowserEngine();
     }, 1500);
   } else {
     openPicker({ reason: 'none' });
@@ -485,7 +573,7 @@ async function main() {
   if (target) {
     setMode('browser');
     const url = normaliseUrl(target);
-    if (url) setTimeout(() => state.browser.go(url), 400);
+    if (url) setTimeout(() => activeBrowser().go(url), 400);
   }
 }
 

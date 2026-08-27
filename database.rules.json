@@ -43,6 +43,7 @@
             "proxy":   { ".validate": "newData.isBoolean()" },
             "control": { ".validate": "newData.isBoolean()" },
             "input":   { ".validate": "newData.isBoolean()" },
+            "scripts": { ".validate": "newData.isBoolean()" },
             "$other": { ".validate": false }
           },
           "$other": { ".validate": false }
@@ -79,12 +80,16 @@
         // ── WebRTC signalling ─────────────────────────────────────────
         // Both peers need to write here: the owner posts the session and its
         // answer, the PC posts the offer. Only handshake data lives in this
-        // subtree — video and input never touch the database.
+        // subtree — video and input never touch the database. Two modes:
+        // 'control' shares the whole desktop; 'scripted' opens one real,
+        // scripted browser tab on the PC for a single URL (Browser mode
+        // with JavaScript turned on) and carries that starting URL along.
         "sessions": {
           "$sessionId": {
             ".write": "auth != null && root.child('machines/' + $machineId + '/ownerUid').val() === auth.uid",
             "clientUid": { ".validate": "newData.isString()" },
-            "mode":      { ".validate": "newData.val() === 'control'" },
+            "mode":      { ".validate": "newData.val() === 'control' || newData.val() === 'scripted'" },
+            "url":       { ".validate": "newData.isString() && newData.val().length <= 2048 && newData.val().matches(/^https?:\\/\\//i)" },
             "state":     { ".validate": "newData.isString() && newData.val().length <= 24" },
             "error":     { ".validate": "newData.isString() && newData.val().length <= 256" },
             "createdAt": { ".validate": "newData.isNumber()" },

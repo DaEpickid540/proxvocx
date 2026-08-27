@@ -38,6 +38,8 @@ export const hostBridge = {
     captureSilent: !!native?.listScreenSources,
     /** Synthetic mouse and keyboard. Impossible from a page. */
     input: !!native?.injectInput,
+    /** A real, scripted browser tab on the PC's own network. Desktop-only. */
+    scripts: !!native?.scriptedOpen,
   },
 
   /**
@@ -134,6 +136,55 @@ export const hostBridge = {
   /** Lets the shell reflect connector state in the tray icon and tooltip. */
   reportStatus(status) {
     native?.reportStatus?.(status);
+  },
+
+  /**
+   * Opens a real, scripted browser tab on the PC and returns a live
+   * MediaStream of its pixels — full JavaScript, full WebSocket support,
+   * because it is a genuine Chromium tab, not a reconstruction. Frames
+   * arrive over IPC as JPEGs and are painted onto a canvas whose
+   * `captureStream()` is what actually gets handed to WebRTC; that canvas
+   * indirection is the only way to turn "IPC delivers a still image
+   * periodically" into something WebRTC can treat as a video track.
+   */
+  async openScriptedBrowser(sessionId, url, { width = 1280, height = 800, frameRate = 14, onNavState } = {}) {
+    if (!native?.scriptedOpen) {
+      throw new Error('the desktop app is required to run a scripted browser tab');
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    const stream = canvas.captureStream(frameRate);
+
+    const offFrame = native.onScriptedFrame(({ sessionId: id, jpeg, width: w, height: h }) => {
+      if (id !== sessionId) return;
+      createImageBitmap(new Blob([jpeg], { type: 'image/jpeg' })).then((bitmap) => {
+        if (canvas.width !== w) canvas.width = w;
+        if (canvas.height !== h) canvas.height = h;
+        ctx.drawImage(bitmap, 0, 0);
+        bitmap.close();
+      }).catch(() => { /* a dropped frame is not worth failing the session over */ });
+    });
+
+    const offNav = native.onScriptedNavState(({ sessionId: id, ...state }) => {
+      if (id === sessionId) onNavState?.(state);
+    });
+
+    await native.scriptedOpen({ sessionId, url, width, height, frameRate });
+
+    return {
+      stream,
+      navigate: (action, navUrl) => native.scriptedNavigate(sessionId, action, navUrl),
+      sendInput: (event) => native.scriptedInput(sessionId, event),
+      close() {
+        offFrame();
+        offNav();
+        native.scriptedClose(sessionId);
+        for (const track of stream.getTracks()) track.stop();
+      },
+    };
   },
 };
 

@@ -79,13 +79,14 @@ export function waitForDescription(db, path, timeoutMs = 30_000) {
   });
 }
 
-export async function createSession(db, machineId, clientUid, mode = 'control') {
+export async function createSession(db, machineId, clientUid, mode = 'control', extra = {}) {
   const node = push(ref(db, paths.sessions(machineId)));
   await set(node, {
     clientUid,
     mode,
     state: 'requesting',
     createdAt: Date.now(),
+    ...extra,
   });
   return node.key;
 }

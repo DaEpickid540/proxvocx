@@ -22,6 +22,10 @@ import { fetchThroughProxy, FetchFailedError } from './bridge/fetcher.js';
 import { UrlRejectedError } from './bridge/safe-url.js';
 import { injectInput, inputAvailable, inputStatus } from './bridge/input.js';
 import { startStaticServer, packagedPublicDir } from './bridge/static-server.js';
+import {
+  openScriptedBrowser, navigateScriptedBrowser, sendScriptedBrowserInput,
+  closeScriptedBrowser, closeAllScriptedBrowsers,
+} from './bridge/scripted-browser.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = packagedPublicDir();
@@ -245,6 +249,35 @@ function registerIpc() {
     const display = screen.getAllDisplays().find((d) => String(d.id) === String(displayId));
     activeDisplayBounds = display?.bounds || null;
   });
+
+  /* ── scripted browser: a real, JS-enabled tab for one 'scripted' session ── */
+
+  ipcMain.handle('proxvocx:scriptedOpen', (event, { sessionId, url, width, height, frameRate }) => {
+    openScriptedBrowser(sessionId, url, {
+      width, height, frameRate,
+      onFrame: (jpeg, w, h) => {
+        if (event.sender.isDestroyed()) return;
+        event.sender.send('proxvocx:scriptedFrame', { sessionId, jpeg, width: w, height: h });
+      },
+      onNavState: (state) => {
+        if (event.sender.isDestroyed()) return;
+        event.sender.send('proxvocx:scriptedNavState', { sessionId, ...state });
+      },
+    });
+    return true;
+  });
+
+  ipcMain.on('proxvocx:scriptedNavigate', (_event, { sessionId, action, url }) => {
+    navigateScriptedBrowser(sessionId, { action, url });
+  });
+
+  ipcMain.on('proxvocx:scriptedInput', (_event, { sessionId, inputEvent }) => {
+    sendScriptedBrowserInput(sessionId, inputEvent);
+  });
+
+  ipcMain.on('proxvocx:scriptedClose', (_event, { sessionId }) => {
+    closeScriptedBrowser(sessionId);
+  });
 }
 
 /**
@@ -295,6 +328,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on('before-quit', async () => {
     quitting = true;
+    closeAllScriptedBrowsers();
     await staticServer?.close().catch(() => {});
   });
 }

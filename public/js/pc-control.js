@@ -24,6 +24,8 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
     const sessionId = snapshot.key;
     const session = snapshot.val();
     if (!session || active.has(sessionId)) return;
+    // A 'scripted' session belongs to pc-scripted-browser.js, not here.
+    if (session.mode && session.mode !== 'control') return;
     if (session.state && session.state !== 'requesting') return;
 
     try {
@@ -204,6 +206,7 @@ async function sweepStaleSessions(db, machineId) {
   const now = Date.now();
   const dead = [];
   snapshot.forEach((child) => {
+    if (child.val()?.mode && child.val().mode !== 'control') return;
     const createdAt = Number(child.val()?.createdAt) || 0;
     if (now - createdAt > SESSION_MAX_AGE_MS) dead.push(child.key);
   });
