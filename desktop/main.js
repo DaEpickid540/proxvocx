@@ -101,6 +101,7 @@ async function createWindow() {
     backgroundColor: '#1a1a1e',
     autoHideMenuBar: true,
     title: 'proxvocx connector',
+    icon: nativeImage.createFromDataURL(TRAY_ICON_DATA_URL),
     webPreferences: {
       preload: path.join(here, 'preload.cjs'),
       contextIsolation: true,
