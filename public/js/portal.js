@@ -139,12 +139,12 @@ async function main() {
   const user = await waitForAuth(auth);
   boot.hidden = true;
 
-  // Already signed in? Both doors lead to the same Google session now, so
-  // either card can jump straight through — offer the one used last.
-  const lastRole = localStorage.getItem('proxvocx.lastRole');
-  if (user && lastRole) {
-    const card = $(lastRole === 'pc' ? '#pcCard' : '#clientCard');
-    card.querySelector('.portal-card-cta').textContent =
+  // The PC door still fast-paths a cached session — it should survive a
+  // reboot without demanding a fresh sign-in every time. The client door
+  // never does: landing there should always mean a Google prompt was just
+  // shown, so it always opens the modal below, forced-chooser and all.
+  if (user && localStorage.getItem('proxvocx.lastRole') === 'pc') {
+    $('#pcCard').querySelector('.portal-card-cta').textContent =
       `Continue as ${user.displayName || user.email || 'your account'} →`;
   }
 
@@ -156,7 +156,7 @@ async function main() {
   const enterAs = async (role, destination) => {
     showError('');
     localStorage.setItem('proxvocx.lastRole', role);
-    if (auth.currentUser) {
+    if (role === 'pc' && auth.currentUser) {
       location.href = destination;
       return;
     }
@@ -171,12 +171,15 @@ async function main() {
           title: 'Sign in to the client',
           subtitle:
             'Your paired PCs live on this account, so signing in on a new device is ' +
-            'all it takes to reach them again.',
+            'all it takes to reach them again. You will be asked for Google every time ' +
+            'you land here, even on a reload.',
         };
     const signedIn = await signInModal(auth, copy);
     if (signedIn) {
       toast('Signed in', 'success');
-      location.href = destination;
+      // The client checks for this to tell a fresh sign-in from a resumed
+      // one — anything without it gets signed out and sent right back here.
+      location.href = role === 'client' ? `${destination}?fresh=1` : destination;
     }
   };
 

@@ -43,9 +43,16 @@ export {
   signInWithPopup, GoogleAuthProvider,
 };
 
-/** The only sign-in method this app offers, anywhere. */
+/**
+ * The only sign-in method this app offers, anywhere. Forces Google's account
+ * chooser every time instead of silently re-using whichever Google session
+ * is already active in the browser, so "sign in" always means an actual,
+ * visible prompt rather than an invisible pass-through.
+ */
 export function signInWithGoogle(auth) {
-  return signInWithPopup(auth, new GoogleAuthProvider());
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+  return signInWithPopup(auth, provider);
 }
 
 const STORAGE_KEY = 'proxvocx.firebaseConfig';

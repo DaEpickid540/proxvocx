@@ -337,7 +337,25 @@ async function main() {
   state.auth = firebase.auth;
   await usePersistentAuth(state.auth);
 
-  const user = await waitForAuth(state.auth);
+  // Firebase's local persistence survives reloads by design, which is right
+  // for the PC (it should never need re-auth just to reboot) but wrong here —
+  // landing on this page should always mean a Google prompt was just shown,
+  // not a silently resumed session. `?fresh=1` is the one-time signal the
+  // portal attaches right after that prompt; anything else (a reload, a
+  // bookmark, a stale tab) signs out whatever Firebase restores and bounces
+  // back for a fresh one.
+  const url = new URL(location.href);
+  const arrivedFresh = url.searchParams.get('fresh') === '1';
+  if (arrivedFresh) {
+    url.searchParams.delete('fresh');
+    history.replaceState(null, '', url.pathname + url.search + url.hash);
+  }
+
+  let user = await waitForAuth(state.auth);
+  if (user && !arrivedFresh) {
+    await signOut(state.auth);
+    user = null;
+  }
   if (!user) {
     location.replace('../');
     return;
