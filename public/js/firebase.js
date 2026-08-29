@@ -139,6 +139,7 @@ export function parseConfigSnippet(text) {
 }
 
 let cached = null;
+let serverOffsetMs = 0;
 
 /** Initialise (once) and hand back `{ app, auth, db, config }`. */
 export function initFirebase() {
@@ -151,7 +152,22 @@ export function initFirebase() {
   const auth = getAuth(app);
   const db = getDatabase(app);
   cached = { app, auth, db, config };
+
+  // Presence timestamps are written by one machine and read as "fresh?" by
+  // another — comparing raw Date.now() on both ends means two devices whose
+  // clocks merely disagree make an online PC look permanently offline. This
+  // keeps a running correction against Firebase's own clock so every
+  // participant's serverNow() agrees, regardless of local clock drift.
+  onValue(ref(db, '.info/serverTimeOffset'), (snap) => {
+    serverOffsetMs = Number(snap.val()) || 0;
+  });
+
   return cached;
+}
+
+/** `Date.now()` corrected to Firebase's server clock — see initFirebase(). */
+export function serverNow() {
+  return Date.now() + serverOffsetMs;
 }
 
 /** Keep the session across reloads — the whole point of permanent pairing. */

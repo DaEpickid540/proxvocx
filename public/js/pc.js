@@ -15,6 +15,7 @@ import {
   signInWithGoogle,
   signOut,
   describeAuthError,
+  serverNow,
   ref,
   get,
   set,
@@ -664,17 +665,17 @@ async function startPresence() {
   const presenceRef = ref(state.db, paths.presence(state.machineId));
   const beat = () => update(presenceRef, {
     online: true,
-    lastSeen: Date.now(),
+    lastSeen: serverNow(),
     capabilities: currentCapabilities(),
   }).catch(() => {});
 
-  await onDisconnect(presenceRef).update({ online: false, lastSeen: Date.now() });
+  await onDisconnect(presenceRef).update({ online: false, lastSeen: serverNow() });
   await beat();
   state.heartbeat = setInterval(beat, HEARTBEAT_MS);
 
   // Best effort on a clean close; the onDisconnect above is the real backstop.
   window.addEventListener('pagehide', () => {
-    update(presenceRef, { online: false, lastSeen: Date.now() }).catch(() => {});
+    update(presenceRef, { online: false, lastSeen: serverNow() }).catch(() => {});
   });
 }
 

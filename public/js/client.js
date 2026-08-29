@@ -14,6 +14,7 @@ import {
   usePersistentAuth,
   waitForAuth,
   signOut,
+  serverNow,
   ref,
   get,
   onValue,
@@ -51,6 +52,9 @@ const state = {
   notifiedNoScripts: new Set(), // machineIds already told "JS isn't enabled" this load
 };
 
+/** isPresenceFresh() against Firebase's clock, not this device's own. */
+const fresh = (presence) => isPresenceFresh(presence, serverNow());
+
 /** Whichever Browser-mode engine is currently backing the shared UI. */
 function activeBrowser() {
   return state.scriptsActive ? state.scriptedBrowser : state.browser;
@@ -66,7 +70,7 @@ function activeBrowser() {
  */
 function syncBrowserEngine() {
   const entry = state.selected ? state.machines.get(state.selected) : null;
-  const scriptsOn = !!(isPresenceFresh(entry?.presence) && entry.presence.capabilities?.scripts);
+  const scriptsOn = !!(fresh(entry?.presence) && entry.presence.capabilities?.scripts);
 
   if (scriptsOn === state.scriptsActive) return;
 
@@ -134,9 +138,9 @@ function watchPresence(machineId) {
   const stop = onValue(ref(state.db, paths.presence(machineId)), (snapshot) => {
     const entry = state.machines.get(machineId);
     if (!entry) return;
-    const wasOnline = isPresenceFresh(entry.presence);
+    const wasOnline = fresh(entry.presence);
     entry.presence = snapshot.val() || null;
-    const isOnline = isPresenceFresh(entry.presence);
+    const isOnline = fresh(entry.presence);
     renderMachinePill();
 
     // The selected PC going away is exactly when the picker should reappear.
@@ -151,7 +155,7 @@ function watchPresence(machineId) {
 
 function machineList() {
   return Array.from(state.machines.values()).sort((a, b) => {
-    const online = Number(isPresenceFresh(b.presence)) - Number(isPresenceFresh(a.presence));
+    const online = Number(fresh(b.presence)) - Number(fresh(a.presence));
     if (online) return online;
     return (b.pairedAt || 0) - (a.pairedAt || 0);
   });
@@ -173,7 +177,7 @@ function selectMachine(machineId) {
 
 function renderMachinePill() {
   const entry = state.selected ? state.machines.get(state.selected) : null;
-  const online = entry ? isPresenceFresh(entry.presence) : false;
+  const online = entry ? fresh(entry.presence) : false;
   $('#machineLabel').textContent = entry ? entry.name : 'No PC selected';
   const dot = $('#machineDot');
   dot.classList.toggle('online', online);
@@ -200,7 +204,7 @@ async function openPicker({ reason = 'manual' } = {}) {
         return;
       }
       listHost.replaceChildren(...machines.map((machine) => {
-        const online = isPresenceFresh(machine.presence);
+        const online = fresh(machine.presence);
         const caps = machine.presence?.capabilities || {};
         const detail = online
           ? [caps.proxy && 'browsing', caps.control && 'control', caps.input && 'input']
@@ -561,7 +565,7 @@ async function main() {
     // Presence arrives a beat after the list; give it a moment before judging.
     setTimeout(() => {
       const entry = state.machines.get(saved);
-      if (!isPresenceFresh(entry?.presence)) openPicker({ reason: 'offline' });
+      if (!fresh(entry?.presence)) openPicker({ reason: 'offline' });
       else syncBrowserEngine();
     }, 1500);
   } else {
