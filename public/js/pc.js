@@ -761,14 +761,24 @@ async function main() {
   // Ownership drives the whole UI: nobody paired shows a code, at least one
   // owner starts work. The set can change shape after that too — adding or
   // revoking an account — without ever leaving paired mode.
+  //
+  // Which mode we are in is tracked explicitly rather than inferred from
+  // "did the owner set just become non-empty": registerMachine() has already
+  // populated state.owners by the time this subscribes, so on an
+  // already-paired PC that transition never happens. That left the connector
+  // silently half-started — the paired cards stayed hidden, the status pill
+  // stayed on "Connecting…", and startControlHost() (which lives in
+  // enterPairedMode) never ran, so client sessions were never answered.
+  let uiMode = null;
   onValue(ref(state.db, paths.owners(state.machineId)), (snapshot) => {
     const owners = snapshot.val() || {};
-    const wasEmpty = Object.keys(state.owners).length === 0;
-    const isEmpty = Object.keys(owners).length === 0;
     state.owners = owners;
 
-    if (isEmpty) enterPairingMode();
-    else if (wasEmpty) enterPairedMode();
+    if (Object.keys(owners).length === 0) {
+      if (uiMode !== 'pairing') { uiMode = 'pairing'; enterPairingMode(); }
+      return;
+    }
+    if (uiMode !== 'paired') { uiMode = 'paired'; enterPairedMode(); }
     else renderOwnerList();
   }, (err) => log(`ownership watch failed: ${err.message}`, 'error'));
 
