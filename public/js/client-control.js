@@ -314,7 +314,14 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
             fps = Math.round(entry.framesPerSecond || 0);
           }
         });
-        onState?.({ connected: true, status: 'connected', rtt, fps, canInput: hostAllowsInput, screen });
+        // `sources` and `mouseLocked` have to ride along on every update: this
+        // fires every couple of seconds, and onState treats what it is handed
+        // as the whole truth — omitting them made the display picker vanish two
+        // seconds after connecting.
+        onState?.({
+          connected: true, status: 'connected', rtt, fps,
+          canInput: hostAllowsInput, screen, sources, mouseLocked,
+        });
       } catch {
         /* getStats can throw during teardown */
       }

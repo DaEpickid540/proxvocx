@@ -98,6 +98,11 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
       clientUid: session.clientUid,
       startedAt: Date.now(),
       screen: trackGeometry(stream),
+      // Live capture settings for this session, so recapture() can change one
+      // without losing the other.
+      sourceId: settings.screenSourceId || sources[0]?.id || null,
+      frameRate: settings.frameRate ?? 30,
+      maxHeight: settings.maxHeight ?? 1080,
     };
     active.set(sessionId, entry);
     onSessionChange?.(summary());
@@ -150,8 +155,8 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
 
     // These two reconfigure the live capture rather than the OS input state,
     // so they run regardless of the allowInput setting — they are not input.
-    if (event.t === 'fps') return applyFrameRate(entry, event.v);
-    if (event.t === 'disp') return swapDisplay(sessionId, entry, event.id);
+    if (event.t === 'fps') return recapture(sessionId, entry, { frameRate: event.v });
+    if (event.t === 'disp') return recapture(sessionId, entry, { sourceId: event.id });
 
     const settings = getSettings?.() || {};
     if (settings.allowInput === false || !bridge.capabilities.input) return;
@@ -163,40 +168,56 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
     }
   }
 
-  /** Live frame-rate change on the already-open capture track — no reconnect. */
-  async function applyFrameRate(entry, fps) {
-    const track = entry.stream?.getVideoTracks()[0];
-    if (!track) return;
-    try {
-      await track.applyConstraints({ frameRate: fps });
-      log?.(`frame rate set to ${fps} fps`);
-    } catch (err) {
-      log?.(`could not change frame rate: ${err.message}`, 'warn');
+  /**
+   * Re-opens the capture with new settings and swaps the outgoing track, which
+   * is how BOTH the frame-rate and the display change mid-session.
+   *
+   * Frame rate does not go through track.applyConstraints(): an Electron
+   * desktopCapturer track is created through the legacy `mandatory` constraint
+   * path, and re-applying constraints on one is silently ignored, so the
+   * request looked accepted while nothing changed. Capturing afresh at the
+   * requested rate and calling replaceTrack() actually takes effect, and costs
+   * no renegotiation because the sender and its transceiver stay put.
+   *
+   * The chosen source and rate are remembered per session so that changing one
+   * does not quietly reset the other back to the connector's defaults.
+   */
+  async function recapture(sessionId, entry, { sourceId, frameRate }) {
+    // A browser tab can only capture via getDisplayMedia, which raises the
+    // system picker every time — re-capturing there would put a dialog in
+    // front of the user on every dropdown change, so leave it alone.
+    if (!bridge.capabilities.captureSilent) {
+      log?.('changing the display or frame rate needs the desktop app', 'warn');
+      return;
     }
-  }
+    if (sourceId !== undefined) entry.sourceId = sourceId;
+    if (frameRate !== undefined) entry.frameRate = frameRate;
 
-  /** Swaps the captured display mid-session by replacing the outgoing track. */
-  async function swapDisplay(sessionId, entry, sourceId) {
-    const settings = getSettings?.() || {};
     try {
       const newStream = await bridge.captureScreen({
-        sourceId,
-        maxHeight: settings.maxHeight ?? 1080,
-        frameRate: settings.frameRate ?? 30,
+        sourceId: entry.sourceId,
+        maxHeight: entry.maxHeight,
+        frameRate: entry.frameRate,
       });
-      const newTrack = newStream.getVideoTracks()[0];
       const sender = entry.pc.getSenders().find((s) => s.track?.kind === 'video');
-      await sender?.replaceTrack(newTrack);
+      if (!sender) throw new Error('no video sender on this session');
+      await sender.replaceTrack(newStream.getVideoTracks()[0]);
 
-      for (const track of entry.stream.getTracks()) track.stop();
+      const previous = entry.stream;
       entry.stream = newStream;
       entry.screen = trackGeometry(newStream);
       for (const track of newStream.getTracks()) {
         track.addEventListener('ended', () => teardown(sessionId, 'screen sharing stopped'));
       }
-      log?.('switched display', 'good');
+      // Only after the swap has succeeded, or a failure mid-way would leave
+      // the session with its old track already stopped and nothing sending.
+      for (const track of previous.getTracks()) track.stop();
+
+      log?.(sourceId !== undefined
+        ? 'switched display'
+        : `frame rate set to ${entry.frameRate} fps`, 'good');
     } catch (err) {
-      log?.(`could not switch display: ${err.message}`, 'warn');
+      log?.(`could not reconfigure the capture: ${err.message}`, 'warn');
     }
   }
 
