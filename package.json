@@ -1,6 +1,6 @@
 {
   "name": "proxvocx",
-  "version": "2.10.0",
+  "version": "2.11.0",
   "description": "Firebase-brokered PC connector: browse the web through your PC, or take it over outright. One desktop install, one hosted site, no Cloud Functions.",
   "type": "module",
   "main": "desktop/main.js",

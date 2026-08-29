@@ -20,6 +20,8 @@ import {
 
 const HIDE_HINT_KEY = 'proxvocx.hideEscHint';
 
+const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
+
 export function createControlViewer({ db, uid, getMachineId, elements, onState }) {
   const { stage, video, overlay, overlayTitle, overlayMessage, connectBtn, hint } = elements;
 
@@ -30,10 +32,26 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
   let statsTimer = null;
   let captured = false;
   let mouseLocked = false;
+  // Chromium reports one garbage movementX/Y — sometimes a huge one — on the
+  // very first pointermove after a lock is acquired, and again after
+  // alt-tabbing back into an already-locked window. Left alone that single
+  // event reads as a violent flick and can spin a game's camera all the way
+  // around on its own; the fix is just to throw that one event away.
+  let skipNextMove = false;
   let hostAllowsInput = false;
   let screen = { width: 1920, height: 1080 };
   let sources = [];
   let lastMoveSent = 0;
+  // Deltas arriving faster than the ~120Hz send ceiling used to be dropped
+  // outright rather than folded into the next send. That is harmless for an
+  // absolute position — the final position after a burst is still correct —
+  // but for a relative delta a dropped event is motion that never happened,
+  // and dropping them under a fast flick (exactly when aim precision in a
+  // game matters most) is what made the cursor feel like it was fighting
+  // back. Accumulated here and flushed as one event instead.
+  let pendingDX = 0;
+  let pendingDY = 0;
+  const MAX_REL_DELTA = 350; // px/event — clamps any other single-event outlier
 
   /* ── connect ───────────────────────────────────────────────── */
 
@@ -187,16 +205,32 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
 
   function bindInput() {
     video.addEventListener('pointermove', (event) => {
-      // ~120Hz ceiling: a trackpad can fire far faster than the PC can replay.
-      const now = performance.now();
-      if (now - lastMoveSent < 8) return;
-
       if (mouseLocked) {
-        if (!event.movementX && !event.movementY) return;
+        if (skipNextMove) {
+          skipNextMove = false;
+          return;
+        }
+        const dx = clamp(event.movementX, -MAX_REL_DELTA, MAX_REL_DELTA);
+        const dy = clamp(event.movementY, -MAX_REL_DELTA, MAX_REL_DELTA);
+        pendingDX += dx;
+        pendingDY += dy;
+
+        // ~120Hz ceiling: a trackpad can fire far faster than the PC can
+        // replay. Only the SEND is throttled — the deltas above still
+        // accumulate every frame, so nothing throttled away is lost, just
+        // batched into the next one.
+        const now = performance.now();
+        if (now - lastMoveSent < 8) return;
         lastMoveSent = now;
-        send(pointerRel(event.movementX, event.movementY));
+        if (!pendingDX && !pendingDY) return;
+        send(pointerRel(pendingDX, pendingDY));
+        pendingDX = 0;
+        pendingDY = 0;
         return;
       }
+
+      const now = performance.now();
+      if (now - lastMoveSent < 8) return;
       const point = toScreenPoint(event);
       if (!point.inside) return;
       lastMoveSent = now;
@@ -253,9 +287,22 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
     // The browser can drop pointer lock on its own (Escape, alt-tab, an
     // extension) — mirror that back into our own state either way.
     document.addEventListener('pointerlockchange', () => {
-      mouseLocked = document.pointerLockElement === video;
+      const nowLocked = document.pointerLockElement === video;
+      if (nowLocked && !mouseLocked) {
+        skipNextMove = true;
+        pendingDX = 0;
+        pendingDY = 0;
+      }
+      mouseLocked = nowLocked;
       stage.classList.toggle('mouse-locked', mouseLocked);
       onState?.({ connected: !!pc, status: pc ? 'connected' : 'idle', canInput: hostAllowsInput, screen, sources, mouseLocked });
+    });
+
+    // The same garbage-first-delta quirk shows up again after alt-tabbing
+    // back into a window whose lock never actually released — no
+    // pointerlockchange fires for that, since the lock state did not change.
+    window.addEventListener('focus', () => {
+      if (mouseLocked) skipNextMove = true;
     });
   }
 

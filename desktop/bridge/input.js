@@ -47,16 +47,52 @@ export async function injectInput(event, bounds) {
   const nut = await loadBackend();
   if (!nut) throw new Error(reason);
 
+  // Mouse-move events arrive far faster than an IPC round trip to nut-js
+  // completes — the viewer paces them at up to ~125Hz, one native call away.
+  // Handling them as they arrive, unserialized, meant two in-flight moves
+  // could each read the cursor's position before the other had written its
+  // own, so one delta silently overwrote the other instead of both applying.
+  // Under a fast flick that dropped or reordered enough deltas to feel like
+  // the cursor was fighting the mouse — reported as a game's camera randomly
+  // "tripping out" or spinning. Queuing every position-touching call behind
+  // the previous one's completion is what actually fixes that, not just
+  // caching the position (below) — the cache only removes the read half of
+  // the race, not the write-ordering half.
+  if (event.t === 'p' || event.t === 'pr' || event.t === 'w') {
+    return enqueue(() => {
+      if (event.t === 'pr') return pointerRelEvent(nut, event);
+      if (event.t === 'w') return wheelEvent(nut, event, bounds);
+      return pointerEvent(nut, event, bounds);
+    });
+  }
+
   switch (event.t) {
-    case 'p': return pointerEvent(nut, event, bounds);
-    case 'pr': return pointerRelEvent(nut, event);
-    case 'w': return wheelEvent(nut, event, bounds);
     case 'k': return keyEvent(nut, event);
     case 'x': return nut.keyboard.type(event.v);
     case 'c': return setClipboard(nut, event.v);
     default: return undefined;
   }
 }
+
+let mouseQueue = Promise.resolve();
+
+/** Runs `task` after every previously queued mouse task has settled. */
+function enqueue(task) {
+  const run = mouseQueue.then(task, task);
+  // Swallow so one failed task does not wedge every task queued after it —
+  // the caller of enqueue() still sees its own rejection via `run`.
+  mouseQueue = run.catch(() => {});
+  return run;
+}
+
+/**
+ * Where the cursor actually is, tracked locally instead of re-read from the
+ * OS on every relative move — nut-js's own getPosition() is itself an IPC
+ * round trip, and calling it per event was the other half of the race this
+ * queue exists to close. Cleared whenever an absolute move lands, so the two
+ * kinds of positioning can never drift apart from each other.
+ */
+let cachedPos = null;
 
 function toPixels(event, bounds) {
   return {
@@ -77,6 +113,7 @@ async function pointerEvent(nut, event, bounds) {
   // also snap the cursor back to some stale absolute position.
   if (!event.rel) {
     const { x, y } = toPixels(event, bounds);
+    cachedPos = { x, y };
     await nut.mouse.setPosition(new nut.Point(x, y));
   }
 
@@ -92,19 +129,18 @@ async function pointerEvent(nut, event, bounds) {
 
 /**
  * Relative motion for games that use the Pointer Lock API — nut-js only
- * offers absolute positioning, so this reads the current OS cursor position
- * and nudges it by the reported delta instead of anything the viewer sent.
+ * offers absolute positioning, so this adds the delta onto a locally-tracked
+ * position instead. Always via `enqueue()`; see injectInput().
  */
 async function pointerRelEvent(nut, event) {
-  const current = await nut.mouse.getPosition();
-  await nut.mouse.setPosition(new nut.Point(
-    Math.round(current.x + event.dx),
-    Math.round(current.y + event.dy),
-  ));
+  if (!cachedPos) cachedPos = await nut.mouse.getPosition();
+  cachedPos = { x: cachedPos.x + event.dx, y: cachedPos.y + event.dy };
+  await nut.mouse.setPosition(new nut.Point(Math.round(cachedPos.x), Math.round(cachedPos.y)));
 }
 
 async function wheelEvent(nut, event, bounds) {
   const { x, y } = toPixels(event, bounds);
+  cachedPos = { x, y };
   await nut.mouse.setPosition(new nut.Point(x, y));
 
   // Browsers report pixels; nut counts notches. ~100px per notch is what a
