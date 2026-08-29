@@ -306,7 +306,18 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(async () => {
     try {
       if (CHROME_LIKE_USER_AGENT) session.defaultSession.setUserAgent(CHROME_LIKE_USER_AGENT);
-      staticServer = await startStaticServer(PUBLIC_DIR);
+      // A fixed port keeps http://localhost:<port> the same origin across
+      // restarts — everything the page persists (the pasted Firebase config,
+      // the signed-in auth session, this machine's id) lives in that origin's
+      // localStorage/IndexedDB. A random port meant a fresh, empty origin on
+      // almost every launch: config and sign-in silently vanished and the
+      // page bounced back to the unconfigured portal before doing anything
+      // visibly wrong. Falls back to a random port only if this one is
+      // somehow already taken (e.g. a previous instance still shutting down).
+      staticServer = await startStaticServer(PUBLIC_DIR, { port: 51820 }).catch((err) => {
+        log.warn(`fixed port 51820 unavailable (${err.message}), falling back to a random port — sign-in may not persist across restarts`);
+        return startStaticServer(PUBLIC_DIR);
+      });
       registerIpc();
       createTray();
       await createWindow();
