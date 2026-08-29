@@ -736,7 +736,29 @@ async function main() {
   await usePersistentAuth(state.auth);
 
   $('#bootLabel').textContent = 'Checking sign-in…';
-  const restored = await waitForAuth(state.auth);
+  let restored = await waitForAuth(state.auth);
+
+  // Firebase reads its stored session once, moments after the page loads, and
+  // never looks again. On the first start after an installer has replaced a
+  // running copy of the app that read lands while the browser storage layer is
+  // still coming up, so it returns nothing even though the session is on disk
+  // — and the connector then waits at a Google prompt on a machine nobody is
+  // sitting at, which is exactly when a PC needs to come back by itself.
+  // Re-running the read a few seconds later is what actually recovers it; a
+  // reload is the only way to make Firebase do that. Bounded, and only on the
+  // desktop host, so a genuinely signed-out PC still ends up at the prompt.
+  if (!restored && hostBridge.isDesktop) {
+    let attempt = 0;
+    try { attempt = Number(sessionStorage.getItem('proxvocx.authRetries') || '0'); } catch { attempt = 99; }
+    if (attempt < 3) {
+      try { sessionStorage.setItem('proxvocx.authRetries', String(attempt + 1)); } catch { /* no store */ }
+      $('#bootLabel').textContent = 'Restoring your session…';
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      location.reload();
+      return;
+    }
+  }
+
   await (restored ? Promise.resolve(restored) : signInGate());
 
   await hostBridge.probe();

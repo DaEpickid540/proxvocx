@@ -179,8 +179,22 @@ export async function usePersistentAuth(auth) {
   }
 }
 
-/** Resolves with the current user (or null) once Firebase has restored state. */
-export function waitForAuth(auth) {
+/**
+ * Resolves with the current user (or null) once Firebase has restored state.
+ *
+ * Prefers authStateReady(), which the SDK resolves only after the *initial*
+ * persisted state has been read. The first onAuthStateChanged callback is not
+ * quite the same guarantee, and taking it as one is how a signed-in PC could
+ * decide it was signed out and sit at a prompt with a perfectly good session
+ * still on disk.
+ */
+export async function waitForAuth(auth) {
+  if (typeof auth.authStateReady === 'function') {
+    try {
+      await auth.authStateReady();
+      return auth.currentUser;
+    } catch { /* fall through to the listener below */ }
+  }
   return new Promise((resolve) => {
     const stop = onAuthStateChanged(auth, (user) => {
       stop();

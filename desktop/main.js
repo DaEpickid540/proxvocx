@@ -15,6 +15,7 @@
 import { app, BrowserWindow, ipcMain, desktopCapturer, screen, Tray, Menu, nativeImage, shell, dialog, session } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
@@ -39,12 +40,37 @@ const FETCH_CONFIG = {
     || 'Mozilla/5.0 (compatible; proxvocx/1.0; +https://github.com/proxvocx)',
 };
 
+/**
+ * Nothing launches this app from a terminal — it is started by the installer,
+ * by Windows at login, or from the Start menu, and console output goes
+ * nowhere in all three cases. A rolling file in userData is the only way to
+ * find out afterwards why a start that produced no window also produced no
+ * error.
+ */
+const logPath = () => path.join(app.getPath('userData'), 'connector.log');
+
+function toFile(level, args) {
+  try {
+    const line = `${new Date().toISOString()} [${level}] ${args.map(String).join(' ')}\n`;
+    // Keep it from growing without bound across months of daily launches.
+    try {
+      if (fsSync.statSync(logPath()).size > 512 * 1024) fsSync.unlinkSync(logPath());
+    } catch { /* no log yet */ }
+    fsSync.appendFileSync(logPath(), line);
+  } catch { /* logging must never be the thing that breaks startup */ }
+}
+
 const log = {
   debug: () => {},
-  info: (...args) => console.log('[proxvocx]', ...args),
-  warn: (...args) => console.warn('[proxvocx]', ...args),
-  error: (...args) => console.error('[proxvocx]', ...args),
+  info: (...args) => { console.log('[proxvocx]', ...args); toFile('info', args); },
+  warn: (...args) => { console.warn('[proxvocx]', ...args); toFile('warn', args); },
+  error: (...args) => { console.error('[proxvocx]', ...args); toFile('error', args); },
 };
+
+// A renderer that throws on boot is exactly the failure that leaves the tray
+// icon sitting there with nothing behind it, so it has to reach the log too.
+process.on('uncaughtException', (err) => log.error('uncaught:', err?.stack || err));
+process.on('unhandledRejection', (err) => log.error('unhandled rejection:', err?.stack || err));
 
 let mainWindow = null;
 let tray = null;
@@ -93,6 +119,39 @@ async function saveStore(value) {
   return value;
 }
 
+/**
+ * On the first start after the installer has replaced a running copy of the
+ * app, Firebase's stored session comes back empty and the connector waits at
+ * a Google prompt — on a machine nobody is sitting at, which is the whole
+ * point of a background connector, that means it silently never comes back
+ * online after an update. Reloading the page does not help; the session only
+ * reappears in a freshly started process, so start one.
+ *
+ * Only for a PC that was already set up (it has a machineId): a genuinely
+ * new install has no session to lose and should just ask. The timestamp is
+ * persisted so a PC that really is signed out relaunches once and then leaves
+ * the prompt up instead of restarting forever.
+ */
+async function recoverStalledSignIn() {
+  try {
+    const store = await loadStore();
+    if (!store.machineId) return;
+
+    const since = Date.now() - (Number(store.authRelaunchAt) || 0);
+    if (since < 5 * 60 * 1000) {
+      log.warn('sign-in still not restored after a relaunch — leaving the prompt for the user');
+      return;
+    }
+
+    await saveStore({ ...store, authRelaunchAt: Date.now() });
+    log.warn('stored session did not restore on this start — relaunching once');
+    app.relaunch();
+    app.exit(0);
+  } catch (err) {
+    log.error('could not recover the stalled sign-in:', err.message);
+  }
+}
+
 /* ── window ──────────────────────────────────────────────────── */
 
 async function createWindow() {
@@ -133,6 +192,40 @@ async function createWindow() {
   // window created with `show: false` then stays invisible forever — the
   // connector running with no way to reach its own UI.
   mainWindow.once('ready-to-show', () => mainWindow.show());
+
+  mainWindow.webContents.on('render-process-gone', (_e, d) =>
+    log.error('renderer gone:', d?.reason, d?.exitCode));
+  mainWindow.webContents.on('did-fail-load', (_e, code, desc, url) =>
+    log.error('did-fail-load:', code, desc, url));
+  mainWindow.webContents.on('console-message', (_e, level, message) => {
+    if (level >= 2) log.warn('renderer:', message);
+  });
+
+  // Records where boot actually got to. A connector that registers and
+  // heartbeats reaches 'paired'/'pairing'; anything else stalled, and this is
+  // the only trace of it on a launch that had no console attached.
+  mainWindow.webContents.on('did-finish-load', () => {
+    setTimeout(async () => {
+      let parsed;
+      try {
+        const state = await mainWindow.webContents.executeJavaScript(
+          `JSON.stringify({
+             url: location.href,
+             status: document.querySelector('#statusPill')?.textContent,
+             signInGateShown: document.querySelector('#signInGate') &&
+               !document.querySelector('#signInGate').hidden,
+             booting: document.querySelector('#boot') &&
+               !document.querySelector('#boot').hidden,
+           })`);
+        log.info('boot state:', state);
+        parsed = JSON.parse(state);
+      } catch (err) {
+        log.warn('boot state unavailable:', err.message);
+        return;
+      }
+      if (parsed.signInGateShown) await recoverStalledSignIn();
+    }, 25000);
+  });
 
   log.info(`loading connector from ${target}`);
   await mainWindow.loadURL(target);
