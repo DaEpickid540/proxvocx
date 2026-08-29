@@ -13,8 +13,17 @@
 export const INPUT_CHANNEL = 'input';
 
 /** Pointer: move, press, release, click, double click. */
-export const pointer = (action, x, y, button = 'left') =>
-  ({ t: 'p', a: action, x: clamp01(x), y: clamp01(y), b: button });
+export const pointer = (action, x, y, button = 'left', rel = false) =>
+  ({ t: 'p', a: action, x: clamp01(x), y: clamp01(y), b: button, ...(rel ? { rel: true } : {}) });
+
+/** Relative pointer motion under Pointer Lock — for FPS-style games. */
+export const pointerRel = (dx, dy) => ({ t: 'pr', dx: Math.round(dx), dy: Math.round(dy) });
+
+/** Ask the host to change its live capture frame rate, without reconnecting. */
+export const setFps = (value) => ({ t: 'fps', v: value });
+
+/** Ask the host to switch which display it is capturing, without reconnecting. */
+export const switchDisplay = (id) => ({ t: 'disp', id: String(id) });
 
 /** Wheel, in CSS-pixel-ish deltas the host scales to notches. */
 export const wheel = (x, y, dx, dy) =>
@@ -81,6 +90,12 @@ export function isValidEvent(event) {
       return ['move', 'down', 'up', 'click', 'dblclick'].includes(event.a)
         && isUnit(event.x) && isUnit(event.y)
         && ['left', 'right', 'middle'].includes(event.b ?? 'left');
+    case 'pr':
+      return Number.isFinite(event.dx) && Number.isFinite(event.dy);
+    case 'fps':
+      return Number.isFinite(event.v) && event.v >= 1 && event.v <= 240;
+    case 'disp':
+      return typeof event.id === 'string' && event.id.length > 0 && event.id.length <= 256;
     case 'w':
       return isUnit(event.x) && isUnit(event.y)
         && Number.isFinite(event.dx) && Number.isFinite(event.dy);

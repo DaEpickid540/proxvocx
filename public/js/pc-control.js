@@ -67,6 +67,12 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
       frameRate: settings.frameRate ?? 30,
     });
 
+    // Silent multi-display capture (desktop app only) — lets the client swap
+    // which monitor it's watching without walking over to this machine.
+    const sources = bridge.capabilities.captureSilent
+      ? await bridge.listScreenSources().catch(() => [])
+      : [];
+
     const pc = new RTCPeerConnection({ iceServers: iceServers(settings.turn) });
     for (const track of stream.getTracks()) pc.addTrack(track, stream);
 
@@ -110,6 +116,7 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
       capabilities: {
         input: bridge.capabilities.input && settings.allowInput !== false,
       },
+      sources: sources.map((s) => ({ id: s.id, name: s.name })),
     });
     await update(ref(db, paths.session(machineId, sessionId)), { state: 'offered' });
 
@@ -133,9 +140,6 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
     const entry = active.get(sessionId);
     if (!entry) return;
 
-    const settings = getSettings?.() || {};
-    if (settings.allowInput === false || !bridge.capabilities.input) return;
-
     let event;
     try {
       event = JSON.parse(raw);
@@ -144,10 +148,55 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
     }
     if (!isValidEvent(event)) return;
 
+    // These two reconfigure the live capture rather than the OS input state,
+    // so they run regardless of the allowInput setting — they are not input.
+    if (event.t === 'fps') return applyFrameRate(entry, event.v);
+    if (event.t === 'disp') return swapDisplay(sessionId, entry, event.id);
+
+    const settings = getSettings?.() || {};
+    if (settings.allowInput === false || !bridge.capabilities.input) return;
+
     try {
       await bridge.injectInput({ ...event, screen: entry.screen });
     } catch (err) {
       log?.(`input rejected: ${err.message}`, 'warn');
+    }
+  }
+
+  /** Live frame-rate change on the already-open capture track — no reconnect. */
+  async function applyFrameRate(entry, fps) {
+    const track = entry.stream?.getVideoTracks()[0];
+    if (!track) return;
+    try {
+      await track.applyConstraints({ frameRate: fps });
+      log?.(`frame rate set to ${fps} fps`);
+    } catch (err) {
+      log?.(`could not change frame rate: ${err.message}`, 'warn');
+    }
+  }
+
+  /** Swaps the captured display mid-session by replacing the outgoing track. */
+  async function swapDisplay(sessionId, entry, sourceId) {
+    const settings = getSettings?.() || {};
+    try {
+      const newStream = await bridge.captureScreen({
+        sourceId,
+        maxHeight: settings.maxHeight ?? 1080,
+        frameRate: settings.frameRate ?? 30,
+      });
+      const newTrack = newStream.getVideoTracks()[0];
+      const sender = entry.pc.getSenders().find((s) => s.track?.kind === 'video');
+      await sender?.replaceTrack(newTrack);
+
+      for (const track of entry.stream.getTracks()) track.stop();
+      entry.stream = newStream;
+      entry.screen = trackGeometry(newStream);
+      for (const track of newStream.getTracks()) {
+        track.addEventListener('ended', () => teardown(sessionId, 'screen sharing stopped'));
+      }
+      log?.('switched display', 'good');
+    } catch (err) {
+      log?.(`could not switch display: ${err.message}`, 'warn');
     }
   }
 

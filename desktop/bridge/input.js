@@ -49,6 +49,7 @@ export async function injectInput(event, bounds) {
 
   switch (event.t) {
     case 'p': return pointerEvent(nut, event, bounds);
+    case 'pr': return pointerRelEvent(nut, event);
     case 'w': return wheelEvent(nut, event, bounds);
     case 'k': return keyEvent(nut, event);
     case 'x': return nut.keyboard.type(event.v);
@@ -71,8 +72,13 @@ function buttonOf(nut, name) {
 }
 
 async function pointerEvent(nut, event, bounds) {
-  const { x, y } = toPixels(event, bounds);
-  await nut.mouse.setPosition(new nut.Point(x, y));
+  // Under Pointer Lock the viewer has no meaningful x/y — it is driving via
+  // relative deltas instead (see pointerRelEvent) — so a click there must not
+  // also snap the cursor back to some stale absolute position.
+  if (!event.rel) {
+    const { x, y } = toPixels(event, bounds);
+    await nut.mouse.setPosition(new nut.Point(x, y));
+  }
 
   const button = buttonOf(nut, event.b);
   switch (event.a) {
@@ -82,6 +88,19 @@ async function pointerEvent(nut, event, bounds) {
     case 'dblclick': return nut.mouse.doubleClick(button);
     default:         return undefined; // plain move, already applied
   }
+}
+
+/**
+ * Relative motion for games that use the Pointer Lock API — nut-js only
+ * offers absolute positioning, so this reads the current OS cursor position
+ * and nudges it by the reported delta instead of anything the viewer sent.
+ */
+async function pointerRelEvent(nut, event) {
+  const current = await nut.mouse.getPosition();
+  await nut.mouse.setPosition(new nut.Point(
+    Math.round(current.x + event.dx),
+    Math.round(current.y + event.dy),
+  ));
 }
 
 async function wheelEvent(nut, event, bounds) {

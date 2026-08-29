@@ -14,9 +14,11 @@ import { ref, set, update } from './firebase.js';
 import { paths } from './paths.js';
 import { iceServers, attachIce, createSession, closeSession, waitForDescription } from './signaling.js';
 import {
-  INPUT_CHANNEL, pointer, wheel, key, text as textEvent, clipboard as clipboardEvent,
-  buttonFromEvent,
+  INPUT_CHANNEL, pointer, pointerRel, wheel, key, text as textEvent, clipboard as clipboardEvent,
+  buttonFromEvent, setFps, switchDisplay,
 } from './input-protocol.js';
+
+const HIDE_HINT_KEY = 'proxvocx.hideEscHint';
 
 export function createControlViewer({ db, uid, getMachineId, elements, onState }) {
   const { stage, video, overlay, overlayTitle, overlayMessage, connectBtn, hint } = elements;
@@ -27,8 +29,10 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
   let detachIce = null;
   let statsTimer = null;
   let captured = false;
+  let mouseLocked = false;
   let hostAllowsInput = false;
   let screen = { width: 1920, height: 1080 };
+  let sources = [];
   let lastMoveSent = 0;
 
   /* ── connect ───────────────────────────────────────────────── */
@@ -51,6 +55,7 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
       const offer = await waitForDescription(db, paths.sessionOffer(machineId, sessionId), 30_000);
       screen = offer.screen || screen;
       hostAllowsInput = !!offer.capabilities?.input;
+      sources = offer.sources || [];
 
       pc = new RTCPeerConnection({ iceServers: iceServers() });
       detachIce = attachIce(db, machineId, sessionId, pc, 'viewer');
@@ -78,6 +83,7 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
             status: 'connected',
             canInput: hostAllowsInput,
             screen,
+            sources,
           });
           startStats();
         } else if (['failed', 'closed', 'disconnected'].includes(st)) {
@@ -134,18 +140,26 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
     const machineId = getMachineId();
     if (machineId && sessionId) await closeSession(db, machineId, sessionId);
     sessionId = null;
+    sources = [];
     stage.dataset.state = 'idle';
   }
 
   /* ── sending input ─────────────────────────────────────────── */
 
-  const send = (event) => {
-    if (!channel || channel.readyState !== 'open' || !hostAllowsInput) return;
+  /** Raw send, gated only on the channel — used for view-only-safe messages
+   *  like a frame-rate or display change, which are not OS input. */
+  const sendConfig = (event) => {
+    if (!channel || channel.readyState !== 'open') return;
     try {
       channel.send(JSON.stringify(event));
     } catch {
       /* Buffer full — dropping a move frame is better than blocking. */
     }
+  };
+
+  const send = (event) => {
+    if (!hostAllowsInput) return;
+    sendConfig(event);
   };
 
   /**
@@ -173,27 +187,42 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
 
   function bindInput() {
     video.addEventListener('pointermove', (event) => {
-      const point = toScreenPoint(event);
-      if (!point.inside) return;
       // ~120Hz ceiling: a trackpad can fire far faster than the PC can replay.
       const now = performance.now();
       if (now - lastMoveSent < 8) return;
+
+      if (mouseLocked) {
+        if (!event.movementX && !event.movementY) return;
+        lastMoveSent = now;
+        send(pointerRel(event.movementX, event.movementY));
+        return;
+      }
+      const point = toScreenPoint(event);
+      if (!point.inside) return;
       lastMoveSent = now;
       send(pointer('move', point.x, point.y));
     });
 
     video.addEventListener('pointerdown', (event) => {
-      const point = toScreenPoint(event);
-      if (!point.inside) return;
       event.preventDefault();
       captureKeyboard();
+      if (mouseLocked) {
+        send(pointer('down', 0, 0, buttonFromEvent(event), true));
+        return;
+      }
+      const point = toScreenPoint(event);
+      if (!point.inside) return;
       send(pointer('down', point.x, point.y, buttonFromEvent(event)));
     });
 
     video.addEventListener('pointerup', (event) => {
+      event.preventDefault();
+      if (mouseLocked) {
+        send(pointer('up', 0, 0, buttonFromEvent(event), true));
+        return;
+      }
       const point = toScreenPoint(event);
       if (!point.inside) return;
-      event.preventDefault();
       send(pointer('up', point.x, point.y, buttonFromEvent(event)));
     });
 
@@ -220,6 +249,14 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
       const value = event.clipboardData?.getData('text');
       if (value) send(textEvent(value));
     });
+
+    // The browser can drop pointer lock on its own (Escape, alt-tab, an
+    // extension) — mirror that back into our own state either way.
+    document.addEventListener('pointerlockchange', () => {
+      mouseLocked = document.pointerLockElement === video;
+      stage.classList.toggle('mouse-locked', mouseLocked);
+      onState?.({ connected: !!pc, status: pc ? 'connected' : 'idle', canInput: hostAllowsInput, screen, sources, mouseLocked });
+    });
   }
 
   function onKeyDown(event) {
@@ -239,19 +276,24 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
     send(key('up', event));
   }
 
+  function hintDismissed() {
+    try { return localStorage.getItem(HIDE_HINT_KEY) === '1'; } catch { return false; }
+  }
+
   function captureKeyboard() {
     if (captured || !hostAllowsInput) return;
     captured = true;
     stage.classList.add('captured');
-    hint.hidden = false;
+    if (hint) hint.hidden = hintDismissed();
     video.focus();
   }
 
   function releaseKeyboard() {
+    if (document.pointerLockElement === video) document.exitPointerLock();
     if (!captured) return;
     captured = false;
     stage.classList.remove('captured');
-    hint.hidden = true;
+    if (hint) hint.hidden = true;
   }
 
   /* ── stats ─────────────────────────────────────────────────── */
@@ -306,6 +348,47 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
       ];
       for (const item of chord) send({ t: 'k', a: 'down', key: item.k, code: item.code, m: 0 });
       for (const item of [...chord].reverse()) send({ t: 'k', a: 'up', key: item.k, code: item.code, m: 0 });
+    },
+
+    get sources() { return sources; },
+    get mouseLocked() { return mouseLocked; },
+
+    /** Games that use the Pointer Lock API need relative motion, not a cursor
+     *  position — this hands the browser's real mouse device to the video. */
+    lockMouse() {
+      if (!hostAllowsInput) return;
+      captureKeyboard();
+      video.requestPointerLock?.();
+    },
+    unlockMouse() {
+      if (document.pointerLockElement === video) document.exitPointerLock();
+    },
+
+    /** Taps a key not present on the local keyboard — e.g. a Chromebook's
+     *  missing function row. `mods` may set ctrl/alt/shift/meta. */
+    sendKeyTap(code, keyName, mods = {}) {
+      if (!hostAllowsInput) return;
+      const synthetic = {
+        key: keyName, code,
+        ctrlKey: !!mods.ctrl, altKey: !!mods.alt, shiftKey: !!mods.shift, metaKey: !!mods.meta,
+      };
+      send(key('down', synthetic));
+      send(key('up', synthetic));
+    },
+
+    /** Changes the live capture frame rate without dropping the session. */
+    setFrameRate(fps) {
+      sendConfig(setFps(fps));
+    },
+
+    /** Switches which display the host is capturing without reconnecting. */
+    switchDisplay(id) {
+      sendConfig(switchDisplay(id));
+    },
+
+    dismissHint() {
+      try { localStorage.setItem(HIDE_HINT_KEY, '1'); } catch { /* private mode */ }
+      if (hint) hint.hidden = true;
     },
 
     async sendClipboard() {
