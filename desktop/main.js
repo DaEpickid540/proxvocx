@@ -111,6 +111,12 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      // This window IS the connector: its timers are the presence heartbeat
+      // and its WebRTC peer connections are the sessions. Chromium throttles
+      // both to a crawl in a hidden or minimised window, which for an app
+      // whose whole job is to sit in the tray and stay reachable means going
+      // silently offline the moment you close it to the tray.
+      backgroundThrottling: false,
     },
   });
 
@@ -122,10 +128,17 @@ async function createWindow() {
 
   if (CHROME_LIKE_USER_AGENT) mainWindow.webContents.setUserAgent(CHROME_LIKE_USER_AGENT);
 
+  // Registered before the load, not after: 'ready-to-show' usually fires while
+  // loadURL() is still awaiting, so attaching afterwards loses the race and a
+  // window created with `show: false` then stays invisible forever — the
+  // connector running with no way to reach its own UI.
+  mainWindow.once('ready-to-show', () => mainWindow.show());
+
   log.info(`loading connector from ${target}`);
   await mainWindow.loadURL(target);
 
-  mainWindow.once('ready-to-show', () => mainWindow.show());
+  // Belt and braces, in case the event fired before the listener attached.
+  if (!mainWindow.isVisible()) mainWindow.show();
 
   // Google's sign-in popup has to open as a real Electron window sharing this
   // one's session, or the OAuth callback can never post its result back to
