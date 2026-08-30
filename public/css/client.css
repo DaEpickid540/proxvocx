@@ -222,7 +222,12 @@ body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; 
   display: block;
   outline: none;
 }
-.control-video.grabbing { cursor: none; }
+/* The remote screen's own cursor is already part of the video image — a
+   second, local arrow floating on top of it is redundant at best, and wrong
+   whenever the host has hidden its own cursor (games do this and draw a
+   crosshair instead), since then the local arrow is the only one left and it
+   isn't where the game thinks the pointer is. */
+.control-stage[data-state="live"] .control-video { cursor: none; }
 .control-stage[data-state="connecting"] .control-video,
 .control-stage[data-state="idle"] .control-video { display: none; }
 
