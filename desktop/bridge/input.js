@@ -30,6 +30,58 @@ async function loadBackend() {
   return backend;
 }
 
+/**
+ * True relative mouse motion, for games that use the Pointer Lock API.
+ *
+ * nut-js/libnut only ever offer SetCursorPos-style absolute warping — there
+ * is no relative primitive anywhere in that stack. On Windows, Chromium's
+ * Pointer Lock computes movementX/Y from the raw-input (WM_INPUT) mouse
+ * queue while locked, specifically *not* from cursor-position deltas, so a
+ * SetCursorPos-based nudge either produces no motion the game can see or
+ * fights with the browser's own handling of the (hidden, locked) cursor.
+ * Reported as a game's camera spasming or spinning on every move — not
+ * occasionally; structurally, every single injected move was affected.
+ *
+ * SendInput's relative MOUSEEVENTF_MOVE — no MOUSEEVENTF_ABSOLUTE — injects
+ * into that same low-level mouse queue as a real device would, which is what
+ * actually reaches a locked page. koffi calls it directly via user32.dll; no
+ * native compile step, so it stays an optional dependency like nut-js.
+ * Windows-only: this specific failure mode is a Windows Pointer Lock
+ * implementation detail, and absolute nudging remains the mouse-look path on
+ * other platforms.
+ */
+let sendInput = null;
+let sendInputProbed = false;
+
+async function loadSendInput() {
+  if (sendInputProbed) return sendInput;
+  sendInputProbed = true;
+  if (process.platform !== 'win32') return null;
+  try {
+    // koffi is CJS; dynamic import() into this ESM module exposes its
+    // module.exports as the default export.
+    const koffi = (await import('koffi')).default;
+    const user32 = koffi.load('user32.dll');
+    const MOUSEINPUT = koffi.struct('MOUSEINPUT', {
+      dx: 'long', dy: 'long',
+      mouseData: 'uint32', dwFlags: 'uint32',
+      time: 'uint32', dwExtraInfo: 'uint64',
+    });
+    const INPUT = koffi.struct('INPUT', { type: 'uint32', mi: MOUSEINPUT });
+    sendInput = {
+      call: user32.func('SendInput', 'uint32', ['uint32', koffi.pointer(INPUT), 'int']),
+      size: koffi.sizeof(INPUT),
+    };
+  } catch {
+    // Falls back to cursor-nudging below — worse for a Pointer-Locked game,
+    // but still functional for everything else this module does.
+    sendInput = null;
+  }
+  return sendInput;
+}
+
+const MOUSEEVENTF_MOVE = 0x0001;
+
 export async function inputAvailable() {
   return !!(await loadBackend());
 }
@@ -127,12 +179,17 @@ async function pointerEvent(nut, event, bounds) {
   }
 }
 
-/**
- * Relative motion for games that use the Pointer Lock API — nut-js only
- * offers absolute positioning, so this adds the delta onto a locally-tracked
- * position instead. Always via `enqueue()`; see injectInput().
- */
+/** Always via `enqueue()`; see injectInput() and loadSendInput() above. */
 async function pointerRelEvent(nut, event) {
+  const si = await loadSendInput();
+  if (si) {
+    si.call(1, {
+      type: 0, // INPUT_MOUSE
+      mi: { dx: event.dx, dy: event.dy, mouseData: 0, dwFlags: MOUSEEVENTF_MOVE, time: 0, dwExtraInfo: 0 },
+    }, si.size);
+    cachedPos = null; // SendInput moved the real cursor — the cache is now unknown, not stale-safe.
+    return;
+  }
   if (!cachedPos) cachedPos = await nut.mouse.getPosition();
   cachedPos = { x: cachedPos.x + event.dx, y: cachedPos.y + event.dy };
   await nut.mouse.setPosition(new nut.Point(Math.round(cachedPos.x), Math.round(cachedPos.y)));

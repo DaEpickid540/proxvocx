@@ -1,6 +1,6 @@
 {
   "name": "proxvocx",
-  "version": "2.11.0",
+  "version": "2.12.0",
   "description": "Firebase-brokered PC connector: browse the web through your PC, or take it over outright. One desktop install, one hosted site, no Cloud Functions.",
   "type": "module",
   "main": "desktop/main.js",
@@ -22,7 +22,8 @@
     "electron-builder": "^24.13.3"
   },
   "optionalDependencies": {
-    "@nut-tree-fork/nut-js": "^4.2.0"
+    "@nut-tree-fork/nut-js": "^4.2.0",
+    "koffi": "^3.1.6"
   },
   "build": {
     "appId": "dev.proxvocx.connector",
