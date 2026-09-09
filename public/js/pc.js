@@ -45,6 +45,13 @@ const DEFAULT_SETTINGS = {
   frameRate: 60,
   streamMode: 'text',
   codec: 'auto',
+  // Browser mode with JavaScript on. The page is rendered offscreen at this
+  // size, so it is both the sharpness and the layout the site sees — 16:10,
+  // matching the shape the viewer's stage expects.
+  scriptedWidth: 1600,
+  scriptedHeight: 1000,
+  scriptedFrameRate: 20,
+  scriptedQuality: 92,
   screenSourceId: null,
   autoLaunch: false,
 };
@@ -476,6 +483,34 @@ async function openSettings() {
       ['smooth', 'Prefer smoothness (H.264)'],
     ]);
 
+    // Width alone, with the height derived: every option is 16:10, and letting
+    // the two drift apart only produces a letterboxed picture nobody asked for.
+    const pageSize = el('select', { class: 'select-input' },
+      ...[
+        [1280, '1280 x 800 · lightest'],
+        [1600, '1600 x 1000 · balanced'],
+        [1920, '1920 x 1200 · sharpest'],
+      ].map(([value, label]) =>
+        el('option', { value, selected: state.settings.scriptedWidth === value }, label)),
+    );
+    pageSize.addEventListener('change', () => {
+      state.settings.scriptedWidth = Number(pageSize.value);
+      state.settings.scriptedHeight = Math.round(Number(pageSize.value) / 1.6);
+      persistSettings();
+    });
+
+    const pageQuality = settingSelect('scriptedQuality', [
+      [80, 'Lighter · softer text'],
+      [92, 'Balanced'],
+      [97, 'Sharpest · heaviest on the PC'],
+    ], Number);
+
+    const pageFrameRate = settingSelect('scriptedFrameRate', [
+      [14, '14 fps · lightest'],
+      [20, '20 fps · balanced'],
+      [30, '30 fps · smoothest'],
+    ], Number);
+
     const display = sources.length
       ? el('select', { class: 'select-input' },
           ...sources.map((source) =>
@@ -548,6 +583,26 @@ async function openSettings() {
         'Opens a real, scripted browser tab on this PC instead of a script-free page render — ' +
         'full JavaScript and WebSockets, at the cost of it no longer being a lightweight text proxy. ' +
         'Off by default.', hostBridge.capabilities.scripts),
+      hostBridge.capabilities.scripts
+        ? el('div', {},
+            el('div', { class: 'field' },
+              el('span', { class: 'field-label' }, 'Page size'),
+              pageSize,
+            ),
+            el('div', { class: 'field' },
+              el('span', { class: 'field-label' }, 'Page image quality'),
+              el('span', { class: 'hint' },
+                'How much detail survives the trip from the offscreen tab to the video encoder. ' +
+                'Frames are compressed once here before being encoded again, so anything lost ' +
+                'at this step is lost for good.'),
+              pageQuality,
+            ),
+            el('div', { class: 'field' },
+              el('span', { class: 'field-label' }, 'Page frame rate'),
+              pageFrameRate,
+            ),
+          )
+        : null,
 
       el('div', { class: 'section-label', style: { marginTop: '18px' } }, 'Screen'),
       el('div', { class: 'field' },

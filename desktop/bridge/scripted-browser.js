@@ -20,9 +20,21 @@
  */
 import { BrowserWindow } from 'electron';
 
-const DEFAULT_WIDTH = 1280;
-const DEFAULT_HEIGHT = 800;
-const DEFAULT_FRAME_RATE = 14;
+const DEFAULT_WIDTH = 1600;
+const DEFAULT_HEIGHT = 1000;
+const DEFAULT_FRAME_RATE = 20;
+/**
+ * JPEG quality for the frames handed to the renderer.
+ *
+ * This is the first of two compressions the picture meets — WebRTC then
+ * re-encodes it — so whatever this throws away is gone before the video codec
+ * ever sees the frame, and the codec spends bits faithfully reproducing the
+ * artefacts. At 70 that was plainly visible as mush on small text, which is
+ * the one thing a browser is mostly made of. These frames cross a local IPC
+ * boundary rather than the network, so the larger buffer costs memory
+ * bandwidth on the PC, not anything the viewer waits for.
+ */
+const DEFAULT_QUALITY = 92;
 
 const sessions = new Map(); // sessionId -> { win, width, height }
 
@@ -30,6 +42,7 @@ export function openScriptedBrowser(sessionId, url, {
   width = DEFAULT_WIDTH,
   height = DEFAULT_HEIGHT,
   frameRate = DEFAULT_FRAME_RATE,
+  quality = DEFAULT_QUALITY,
   onFrame,
   onNavState,
 } = {}) {
@@ -52,7 +65,7 @@ export function openScriptedBrowser(sessionId, url, {
 
   win.webContents.setFrameRate(frameRate);
   win.webContents.on('paint', (_event, _dirty, image) => {
-    onFrame?.(image.toJPEG(70), width, height);
+    onFrame?.(image.toJPEG(quality), width, height);
   });
 
   const pushNavState = () => {

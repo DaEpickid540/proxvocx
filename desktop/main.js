@@ -357,9 +357,9 @@ function registerIpc() {
 
   /* ── scripted browser: a real, JS-enabled tab for one 'scripted' session ── */
 
-  ipcMain.handle('proxvocx:scriptedOpen', (event, { sessionId, url, width, height, frameRate }) => {
+  ipcMain.handle('proxvocx:scriptedOpen', (event, { sessionId, url, width, height, frameRate, quality }) => {
     openScriptedBrowser(sessionId, url, {
-      width, height, frameRate,
+      width, height, frameRate, quality,
       onFrame: (jpeg, w, h) => {
         if (event.sender.isDestroyed()) return;
         event.sender.send('proxvocx:scriptedFrame', { sessionId, jpeg, width: w, height: h });

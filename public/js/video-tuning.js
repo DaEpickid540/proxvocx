@@ -59,6 +59,12 @@ export const CODEC_ORDERS = {
 const BITS_PER_PIXEL_PER_FRAME = 0.06;
 const MIN_MAX_BITRATE = 1_500_000;
 const MAX_MAX_BITRATE = 25_000_000;
+/* Below this the ceiling stops tracking frame rate. A 15 or 20 fps stream of
+   text is not a stream that needs fewer bits per frame — the frames that do
+   change during a scroll change wholesale, and scaling the budget linearly
+   down with the rate is what makes a slow, sharp stream impossible to ask
+   for. */
+const MIN_EFFECTIVE_FPS = 30;
 
 /* Codecs that carry picture. RTX/RED/ULPFEC ride along in the same m-section
    and must never be given bitrate hints or promoted in the preference list. */
@@ -73,7 +79,7 @@ const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
  */
 export function bitrateFor({ width, height, frameRate }) {
   const pixels = (Number(width) || 1920) * (Number(height) || 1080);
-  const fps = Number(frameRate) || 30;
+  const fps = Math.max(Number(frameRate) || 30, MIN_EFFECTIVE_FPS);
   return Math.round(clamp(pixels * fps * BITS_PER_PIXEL_PER_FRAME, MIN_MAX_BITRATE, MAX_MAX_BITRATE));
 }
 

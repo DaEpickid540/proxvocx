@@ -12,6 +12,9 @@ import { ref, set, update, remove, onValue, onChildAdded, onChildRemoved, get } 
 import { paths } from './paths.js';
 import { iceServers, attachIce, SESSION_MAX_AGE_MS } from './signaling.js';
 import { INPUT_CHANNEL, isValidEvent, navState as buildNavState } from './input-protocol.js';
+import {
+  CODEC_ORDERS, bitrateFor, tuneSender, preferCodecs, applyBitrateHints,
+} from './video-tuning.js';
 
 export function startScriptedBrowserHost({ db, machineId, bridge, log, onStat, getSettings, onSessionChange }) {
   const active = new Map();
@@ -71,10 +74,15 @@ export function startScriptedBrowserHost({ db, machineId, bridge, log, onStat, g
     // there is no reason to depend on that timing being true.
     let entry;
 
+    const page = {
+      width: settings.scriptedWidth ?? 1600,
+      height: settings.scriptedHeight ?? 1000,
+      frameRate: settings.scriptedFrameRate ?? 20,
+      quality: settings.scriptedQuality ?? 92,
+    };
+
     const scripted = await bridge.openScriptedBrowser(sessionId, session.url, {
-      width: settings.scriptedWidth ?? 1280,
-      height: settings.scriptedHeight ?? 800,
-      frameRate: settings.scriptedFrameRate ?? 14,
+      ...page,
       onNavState: (state) => {
         if (entry?.channel?.readyState === 'open') {
           entry.channel.send(JSON.stringify(buildNavState(state)));
@@ -84,6 +92,14 @@ export function startScriptedBrowserHost({ db, machineId, bridge, log, onStat, g
 
     const pc = new RTCPeerConnection({ iceServers: iceServers(settings.turn) });
     for (const track of scripted.stream.getTracks()) pc.addTrack(track, scripted.stream);
+
+    // Same treatment pc-control.js gives the desktop stream. A browser tab is
+    // if anything the stronger case for it: it is text almost end to end, and
+    // it has already been through one lossy pass as a JPEG before WebRTC sees
+    // it, so there is nothing here for a codec left on its camera-video
+    // defaults to be forgiving about.
+    const videoTransceiver = pc.getTransceivers().find((t) => t.sender?.track?.kind === 'video');
+    preferCodecs(videoTransceiver, CODEC_ORDERS[settings.codec] || CODEC_ORDERS.auto);
 
     const channel = pc.createDataChannel(INPUT_CHANNEL, { ordered: true });
     channel.addEventListener('message', (event) => onChannelMessage(sessionId, event.data));
@@ -106,10 +122,23 @@ export function startScriptedBrowserHost({ db, machineId, bridge, log, onStat, g
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+
+    entry.maxBitrate = bitrateFor(page);
+    try {
+      await tuneSender(pc.getSenders().find((s) => s.track?.kind === 'video'), {
+        // Always 'text': this is a web page, never a game.
+        mode: 'text',
+        frameRate: page.frameRate,
+        maxBitrate: entry.maxBitrate,
+      });
+    } catch (err) {
+      log?.(`could not apply the encoder settings: ${err.message}`, 'warn');
+    }
+
     await set(ref(db, paths.sessionOffer(machineId, sessionId)), {
       type: offer.type,
       sdp: offer.sdp,
-      screen: { width: settings.scriptedWidth ?? 1280, height: settings.scriptedHeight ?? 800 },
+      screen: { width: page.width, height: page.height },
     });
     await update(ref(db, paths.session(machineId, sessionId)), { state: 'offered' });
 
@@ -117,11 +146,17 @@ export function startScriptedBrowserHost({ db, machineId, bridge, log, onStat, g
       const answer = snap.val();
       if (!answer?.sdp || pc.signalingState === 'stable') return;
       stopAnswer();
+      const hinted = applyBitrateHints(answer.sdp, { maxBitrate: entry.maxBitrate });
       try {
-        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+        await pc.setRemoteDescription(new RTCSessionDescription({ type: answer.type, sdp: hinted }));
       } catch (err) {
-        log?.(`could not accept the answer: ${err.message}`, 'error');
-        teardown(sessionId, 'bad answer');
+        log?.(`bitrate hints rejected (${err.message}) — connecting without them`, 'warn');
+        try {
+          await pc.setRemoteDescription(new RTCSessionDescription(answer));
+        } catch (plainErr) {
+          log?.(`could not accept the answer: ${plainErr.message}`, 'error');
+          teardown(sessionId, 'bad answer');
+        }
       }
     });
     entry.stopAnswer = stopAnswer;
