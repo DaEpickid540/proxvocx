@@ -1,6 +1,6 @@
 {
   "name": "proxvocx",
-  "version": "2.12.0",
+  "version": "2.13.0",
   "description": "Firebase-brokered PC connector: browse the web through your PC, or take it over outright. One desktop install, one hosted site, no Cloud Functions.",
   "type": "module",
   "main": "desktop/main.js",
@@ -34,14 +34,19 @@
       "package.json"
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "public/icons/icon.ico"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "public/icons/icon.ico",
+      "uninstallerIcon": "public/icons/icon.ico",
+      "installerHeaderIcon": "public/icons/icon.ico"
     },
     "mac": {
       "target": "dmg",
+      "icon": "public/icons/icon.png",
       "category": "public.app-category.utilities",
       "extendInfo": {
         "NSCameraUsageDescription": "proxvocx does not use the camera.",
@@ -50,6 +55,7 @@
     },
     "linux": {
       "target": "AppImage",
+      "icon": "public/icons/icon.png",
       "category": "Utility"
     }
   },

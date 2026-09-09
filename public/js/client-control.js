@@ -41,6 +41,7 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
   let hostAllowsInput = false;
   let screen = { width: 1920, height: 1080 };
   let sources = [];
+  let captureFps = 60;
   let lastMoveSent = 0;
   // Deltas arriving faster than the ~120Hz send ceiling used to be dropped
   // outright rather than folded into the next send. That is harmless for an
@@ -74,6 +75,7 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
       screen = offer.screen || screen;
       hostAllowsInput = !!offer.capabilities?.input;
       sources = offer.sources || [];
+      captureFps = offer.frameRate || captureFps;
 
       pc = new RTCPeerConnection({ iceServers: iceServers() });
       detachIce = attachIce(db, machineId, sessionId, pc, 'viewer');
@@ -102,6 +104,7 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
             canInput: hostAllowsInput,
             screen,
             sources,
+            frameRate: captureFps,
           });
           startStats();
         } else if (['failed', 'closed', 'disconnected'].includes(st)) {
@@ -432,6 +435,7 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
 
     /** Changes the live capture frame rate without dropping the session. */
     setFrameRate(fps) {
+      captureFps = fps;
       sendConfig(setFps(fps));
     },
 

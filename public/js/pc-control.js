@@ -10,6 +10,9 @@ import { ref, set, update, remove, onValue, onChildAdded, onChildRemoved, get } 
 import { paths } from './paths.js';
 import { iceServers, attachIce, SESSION_MAX_AGE_MS } from './signaling.js';
 import { INPUT_CHANNEL, isValidEvent } from './input-protocol.js';
+import {
+  CODEC_ORDERS, bitrateFor, tuneSender, preferCodecs, applyBitrateHints,
+} from './video-tuning.js';
 
 export function startControlHost({ db, machineId, bridge, log, onStat, getSettings, onSessionChange }) {
   const active = new Map();
@@ -61,10 +64,12 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
 
     log?.(`incoming control session ${sessionId.slice(0, 6)}`, 'good');
 
+    const frameRate = settings.frameRate ?? 60;
+    const streamMode = settings.streamMode ?? 'text';
     const stream = await bridge.captureScreen({
       sourceId: settings.screenSourceId || null,
       maxHeight: settings.maxHeight ?? 1080,
-      frameRate: settings.frameRate ?? 30,
+      frameRate,
     });
 
     // Silent multi-display capture (desktop app only) — lets the client swap
@@ -75,6 +80,11 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
 
     const pc = new RTCPeerConnection({ iceServers: iceServers(settings.turn) });
     for (const track of stream.getTracks()) pc.addTrack(track, stream);
+
+    // Codec order has to be settled before the offer is built — it *is* the
+    // order of the m-line the viewer answers against.
+    const videoTransceiver = pc.getTransceivers().find((t) => t.sender?.track?.kind === 'video');
+    preferCodecs(videoTransceiver, CODEC_ORDERS[settings.codec] || CODEC_ORDERS.auto);
 
     // The host opens the channel: it makes the offer, so this saves a
     // renegotiation round trip.
@@ -101,8 +111,9 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
       // Live capture settings for this session, so recapture() can change one
       // without losing the other.
       sourceId: settings.screenSourceId || sources[0]?.id || null,
-      frameRate: settings.frameRate ?? 30,
+      frameRate,
       maxHeight: settings.maxHeight ?? 1080,
+      streamMode,
     };
     active.set(sessionId, entry);
     onSessionChange?.(summary());
@@ -114,6 +125,8 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+    await applyVideoTuning(entry);
+
     await set(ref(db, paths.sessionOffer(machineId, sessionId)), {
       type: offer.type,
       sdp: offer.sdp,
@@ -122,6 +135,9 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
         input: bridge.capabilities.input && settings.allowInput !== false,
       },
       sources: sources.map((s) => ({ id: s.id, name: s.name })),
+      // So the viewer's frame-rate control opens showing what is actually
+      // being captured rather than its own guess.
+      frameRate,
     });
     await update(ref(db, paths.session(machineId, sessionId)), { state: 'offered' });
 
@@ -129,14 +145,49 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
       const answer = snap.val();
       if (!answer?.sdp || pc.signalingState === 'stable') return;
       stopAnswer();
+      // The encoder reads its bitrate hints out of the remote description, so
+      // the answer is the only place they can be written. A rewrite that some
+      // future browser dislikes must not cost the session the picture
+      // entirely, hence the retry on the untouched SDP.
+      const hinted = applyBitrateHints(answer.sdp, { maxBitrate: entry.maxBitrate });
       try {
-        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+        await pc.setRemoteDescription(new RTCSessionDescription({ type: answer.type, sdp: hinted }));
       } catch (err) {
-        log?.(`could not accept the answer: ${err.message}`, 'error');
-        teardown(sessionId, 'bad answer');
+        log?.(`bitrate hints rejected (${err.message}) — connecting without them`, 'warn');
+        try {
+          await pc.setRemoteDescription(new RTCSessionDescription(answer));
+        } catch (plainErr) {
+          log?.(`could not accept the answer: ${plainErr.message}`, 'error');
+          teardown(sessionId, 'bad answer');
+        }
       }
     });
     entry.stopAnswer = stopAnswer;
+  }
+
+  /**
+   * Sizes the bitrate ceiling to the picture actually being captured, then
+   * pushes it — along with the content hint and the degradation preference —
+   * onto the live sender.
+   *
+   * Called once the offer is in place, and again after every `recapture()`:
+   * `replaceTrack()` carries the sender's parameters across, but the content
+   * hint is a property of the track that was just swapped away, and the
+   * ceiling itself depends on the resolution and frame rate that just changed.
+   */
+  async function applyVideoTuning(entry) {
+    entry.maxBitrate = bitrateFor({ ...entry.screen, frameRate: entry.frameRate });
+    const sender = entry.pc.getSenders().find((s) => s.track?.kind === 'video');
+    try {
+      await tuneSender(sender, {
+        mode: entry.streamMode,
+        frameRate: entry.frameRate,
+        maxBitrate: entry.maxBitrate,
+      });
+    } catch (err) {
+      // A stream at Chromium's defaults is worse, but it is still a stream.
+      log?.(`could not apply the encoder settings: ${err.message}`, 'warn');
+    }
   }
 
   /* ── input replay ──────────────────────────────────────────── */
@@ -206,6 +257,7 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
       const previous = entry.stream;
       entry.stream = newStream;
       entry.screen = trackGeometry(newStream);
+      await applyVideoTuning(entry);
       for (const track of newStream.getTracks()) {
         track.addEventListener('ended', () => teardown(sessionId, 'screen sharing stopped'));
       }

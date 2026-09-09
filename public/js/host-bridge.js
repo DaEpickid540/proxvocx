@@ -72,7 +72,7 @@ export const hostBridge = {
    * Returns a MediaStream of the screen. In the desktop app this picks the
    * requested source outright; in a browser it raises the native picker.
    */
-  async captureScreen({ sourceId = null, maxHeight = 1080, frameRate = 30 } = {}) {
+  async captureScreen({ sourceId = null, maxHeight = 1080, frameRate = 60 } = {}) {
     if (native?.listScreenSources) {
       const sources = await native.listScreenSources();
       if (!sources.length) throw new Error('no screen sources were offered by the system');
@@ -85,6 +85,14 @@ export const hostBridge = {
           mandatory: {
             chromeMediaSource: 'desktop',
             chromeMediaSourceId: chosen.id,
+            // The legacy `mandatory` path has no notion of "and keep the
+            // aspect ratio". Given a height cap and nothing else it reaches
+            // for Chromium's default 1920x1080 shape, so anything that is not
+            // 16:9 — an ultrawide, a monitor in portrait — arrives with the
+            // bars baked into the frame and the real pixels squeezed into
+            // whatever is left. Deriving the width cap from the display's own
+            // bounds leaves the height as the only real limit.
+            maxWidth: widthCapFor(chosen, maxHeight),
             maxHeight,
             maxFrameRate: frameRate,
           },
@@ -96,7 +104,9 @@ export const hostBridge = {
     }
     return navigator.mediaDevices.getDisplayMedia({
       audio: false,
-      video: { height: { max: maxHeight }, frameRate: { max: frameRate } },
+      // `ideal` as well as `max`: a bare maximum is a permission to go slower,
+      // and the picker will happily hand back 5 fps without one.
+      video: { height: { max: maxHeight }, frameRate: { ideal: frameRate, max: frameRate } },
     });
   },
 
@@ -187,6 +197,17 @@ export const hostBridge = {
     };
   },
 };
+
+/**
+ * The width that goes with `maxHeight` on this display, rounded to an even
+ * number because video encoders work in 2x2 blocks and an odd dimension costs
+ * a rescale. Falls back to 16:9 when the shell did not report bounds.
+ */
+function widthCapFor(source, maxHeight) {
+  const { width, height } = source?.bounds || {};
+  const aspect = width && height ? width / height : 16 / 9;
+  return Math.round((maxHeight * aspect) / 2) * 2;
+}
 
 function guessPlatform() {
   const ua = navigator?.userAgent || '';

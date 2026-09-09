@@ -359,6 +359,23 @@ function setMode(mode) {
   if (mode === 'browser') syncBrowserEngine();
 }
 
+/**
+ * Fills the display picker from the monitors the connector reported. Only the
+ * desktop app can switch silently, so a browser-hosted connector sends an
+ * empty list and the control stays hidden.
+ */
+function fillDisplays(sources) {
+  const select = $('#controlDisplay');
+  if (select.dataset.filled === String(sources.length) && sources.length) return;
+  select.dataset.filled = String(sources.length);
+  select.replaceChildren(...sources.map((source) => {
+    const option = document.createElement('option');
+    option.value = source.id;
+    option.textContent = source.name;
+    return option;
+  }));
+}
+
 /* ── account ─────────────────────────────────────────────────── */
 
 function openAccount() {
@@ -490,10 +507,16 @@ async function main() {
       connectBtn: $('#connectControlBtn'),
       hint: $('#captureHint'),
     },
-    onState: ({ connected, status, rtt, fps, canInput }) => {
+    onState: ({ connected, status, rtt, fps, canInput, sources, frameRate }) => {
       $('#controlDisconnect').disabled = !connected;
       $('#controlCtrlAltDel').disabled = !connected || !canInput;
       $('#controlPasteBtn').disabled = !connected || !canInput;
+      // Frame rate and display are capture settings, not input, so they stay
+      // available on a view-only session.
+      $('#controlFps').disabled = !connected;
+      if (frameRate) $('#controlFps').value = String(frameRate);
+      if (sources) fillDisplays(sources);
+      $('#controlDisplay').hidden = !connected || !sources?.length;
 
       const dot = $('#latencyDot');
       dot.className = 'latency-dot';
@@ -530,6 +553,12 @@ async function main() {
   $('#controlPasteBtn').addEventListener('click', async () => {
     const sent = await state.control.sendClipboard();
     toast(sent ? 'Clipboard sent to the PC' : 'Could not read the clipboard', sent ? 'success' : 'danger');
+  });
+  $('#controlFps').addEventListener('change', (event) => {
+    state.control.setFrameRate(Number(event.target.value));
+  });
+  $('#controlDisplay').addEventListener('change', (event) => {
+    state.control.switchDisplay(event.target.value);
   });
   $('#controlFullscreen').addEventListener('click', () => {
     const stage = $('#controlStage');

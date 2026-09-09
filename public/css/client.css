@@ -268,6 +268,14 @@ body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; 
   border: 2px solid var(--accent);
   pointer-events: none;
 }
+/* ...but not in fullscreen. There the ring sits on the outermost two pixels of
+   the picture itself and reads as a border the remote screen does not have,
+   and it is answering a question nobody is asking: when the stage IS the whole
+   display there is nowhere else for keystrokes to be going. The "Press Esc to
+   release" hint still says so in words. Two rules, not a selector list, because
+   one unrecognised pseudo-class would drop the whole list. */
+.control-stage:fullscreen.captured::after { content: none; }
+.control-stage:-webkit-full-screen.captured::after { content: none; }
 .capture-hint {
   position: absolute;
   bottom: 14px;

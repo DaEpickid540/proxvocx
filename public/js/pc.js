@@ -38,7 +38,13 @@ const DEFAULT_SETTINGS = {
   allowInput: true,
   allowProxy: true,
   maxHeight: 1080,
-  frameRate: 30,
+  // 30 reads as a stutter on a desktop, where the eye is tracking a cursor and
+  // a text caret rather than a moving subject. The encoder only spends bits on
+  // frames that actually changed, so on a mostly-still screen the extra 30 are
+  // close to free.
+  frameRate: 60,
+  streamMode: 'text',
+  codec: 'auto',
   screenSourceId: null,
   autoLaunch: false,
 };
@@ -433,19 +439,42 @@ async function openSettings() {
       );
     };
 
-    const quality = el('select', { class: 'select-input' },
-      ...[
-        [720, '720p · lightest'],
-        [1080, '1080p · balanced'],
-        [1440, '1440p · sharp'],
-        [2160, 'Native · heaviest'],
-      ].map(([value, label]) =>
-        el('option', { value, selected: state.settings.maxHeight === value }, label)),
-    );
-    quality.addEventListener('change', () => {
-      state.settings.maxHeight = Number(quality.value);
-      persistSettings();
-    });
+    /** A select bound straight to one setting. `cast` keeps numbers numbers. */
+    const settingSelect = (key, options, cast = (v) => v) => {
+      const select = el('select', { class: 'select-input' },
+        ...options.map(([value, label]) =>
+          el('option', { value, selected: state.settings[key] === value }, label)),
+      );
+      select.addEventListener('change', () => {
+        state.settings[key] = cast(select.value);
+        persistSettings();
+      });
+      return select;
+    };
+
+    const quality = settingSelect('maxHeight', [
+      [720, '720p · lightest'],
+      [1080, '1080p · balanced'],
+      [1440, '1440p · sharp'],
+      [2160, 'Native · heaviest'],
+    ], Number);
+
+    const frameRate = settingSelect('frameRate', [
+      [15, '15 fps · slowest link'],
+      [30, '30 fps · light'],
+      [60, '60 fps · smooth'],
+    ], Number);
+
+    const streamMode = settingSelect('streamMode', [
+      ['text', 'Sharp text · reading, editors, browsing'],
+      ['motion', 'Smooth motion · video and games'],
+    ]);
+
+    const codec = settingSelect('codec', [
+      ['auto', 'Automatic'],
+      ['sharp', 'Prefer sharpness (VP9)'],
+      ['smooth', 'Prefer smoothness (H.264)'],
+    ]);
 
     const display = sources.length
       ? el('select', { class: 'select-input' },
@@ -524,6 +553,21 @@ async function openSettings() {
       el('div', { class: 'field' },
         el('span', { class: 'field-label' }, 'Streaming quality'),
         quality,
+      ),
+      el('div', { class: 'field' },
+        el('span', { class: 'field-label' }, 'Frame rate'),
+        frameRate,
+      ),
+      el('div', { class: 'field' },
+        el('span', { class: 'field-label' }, 'Optimise for'),
+        streamMode,
+      ),
+      el('div', { class: 'field' },
+        el('span', { class: 'field-label' }, 'Video codec'),
+        el('span', { class: 'hint' },
+          'VP9 keeps small text crisp but is encoded in software; H.264 uses the GPU, ' +
+          'so it stays smooth on a busy PC at the cost of some sharpness.'),
+        codec,
       ),
       display
         ? el('div', { class: 'field' },
@@ -767,6 +811,13 @@ async function main() {
   state.machineId = store.machineId || generateMachineId();
   state.machineName = store.machineName || (await hostBridge.defaultName());
   state.settings = { ...DEFAULT_SETTINGS, ...(store.settings || {}) };
+  // A frame rate saved before this release was never chosen by anyone — there
+  // was no control for it, so every store holds the old 30 default and would
+  // otherwise pin the stream to it forever. `streamMode` only exists from the
+  // same release, so its absence is what dates the store.
+  if (store.settings && !store.settings.streamMode) {
+    state.settings.frameRate = DEFAULT_SETTINGS.frameRate;
+  }
   if (hostBridge.isDesktop) {
     state.settings.autoLaunch = await hostBridge.getAutoLaunch();
   }

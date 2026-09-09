@@ -181,6 +181,8 @@ option { background: var(--bg-inset); color: var(--text); }
   transition: border-color var(--tr);
 }
 .select-input:focus { border-color: var(--accent); }
+.select-input--sm { padding: 5px 10px; font-size: 0.68rem; min-height: 28px; }
+.select-input:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .input-row { display: flex; gap: 8px; }
 .input-row .text-input { flex: 1; }

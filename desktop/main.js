@@ -164,7 +164,7 @@ async function createWindow() {
     backgroundColor: '#1a1a1e',
     autoHideMenuBar: true,
     title: 'proxvocx connector',
-    icon: nativeImage.createFromDataURL(TRAY_ICON_DATA_URL),
+    icon: appIcon(process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
     webPreferences: {
       preload: path.join(here, 'preload.cjs'),
       contextIsolation: true,
@@ -266,8 +266,7 @@ async function createWindow() {
 }
 
 function createTray() {
-  const icon = nativeImage.createFromDataURL(TRAY_ICON_DATA_URL);
-  tray = new Tray(icon);
+  tray = new Tray(appIcon('tray.png'));
   tray.setToolTip('proxvocx — starting');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Open connector', click: () => { mainWindow?.show(); mainWindow?.focus(); } },
@@ -450,8 +449,30 @@ if (!app.requestSingleInstanceLock()) {
   });
 }
 
-/* A 16px red dot — matches the site's logo mark. */
-const TRAY_ICON_DATA_URL =
+/**
+ * The app mark, from the packaged `public/icons`.
+ *
+ * This has to be a real, multi-resolution file rather than the single 16px
+ * bitmap that used to live here: Windows draws the window and taskbar icon at
+ * 32 and 48px, and handed a 16px source it upscales into mush. The .ico
+ * carries every size from 16 to 256 so each surface gets one rendered for it,
+ * and `nativeImage` picks up `tray@2x.png` on its own next to `tray.png` for
+ * HiDPI trays.
+ *
+ * Note this only covers a *running* app. The icon on the .exe itself, the
+ * installer, and the Start-menu shortcut come from electron-builder's `icon`
+ * settings in package.json — without those, Windows shows Electron's default
+ * atom no matter what this function returns.
+ */
+function appIcon(name) {
+  const image = nativeImage.createFromPath(path.join(PUBLIC_DIR, 'icons', name));
+  // An unreadable asset yields an empty image, and `new Tray()` throws on one.
+  // Starting with a poor icon beats not starting.
+  return image.isEmpty() ? nativeImage.createFromDataURL(FALLBACK_ICON_DATA_URL) : image;
+}
+
+/* Last resort only: a 16px red dot, inline so it cannot itself go missing. */
+const FALLBACK_ICON_DATA_URL =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAoklEQVR42mNkQAX/GYgEjIx' +
   'IGpgY6AhGLRi1YNSCUQtGLRi1YNSCUQuGgQX/8eD/pFrwn5D8fzIt+E9I/j+ZFvwnJP+fTAv+E5L/T6YF/wnJ/yfTgv' +
   '+E5P+TacF/QvL/ybTgPyH5/2Ra8J+Q/H8yLfhPSP4/mRb8JyT/n0wL/hOS/0+mBf8Jyf8n04L/hOT/k2nBf0Ly/8m04' +
