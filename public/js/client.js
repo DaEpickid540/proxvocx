@@ -546,6 +546,11 @@ async function main() {
   $('#navBack').addEventListener('click', () => activeBrowser().back());
   $('#navForward').addEventListener('click', () => activeBrowser().forward());
   $('#navReload').addEventListener('click', () => activeBrowser().reload());
+  $('#browserFullscreen').addEventListener('click', () => {
+    const stage = $('#browserStage');
+    if (document.fullscreenElement) document.exitFullscreen();
+    else stage.requestFullscreen?.().catch(() => toast('Fullscreen was refused', 'danger'));
+  });
 
   $('#connectControlBtn').addEventListener('click', () => state.control.connect());
   $('#controlDisconnect').addEventListener('click', () => state.control.disconnect('You disconnected.'));

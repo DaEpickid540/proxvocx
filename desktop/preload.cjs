@@ -43,6 +43,8 @@ contextBridge.exposeInMainWorld('proxvocx', {
    * continuously for as long as the session is open.
    */
   scriptedOpen: (opts) => ipcRenderer.invoke('proxvocx:scriptedOpen', opts),
+  scriptedResize: (sessionId, width, height) =>
+    ipcRenderer.send('proxvocx:scriptedResize', { sessionId, width, height }),
   scriptedNavigate: (sessionId, action, url) =>
     ipcRenderer.send('proxvocx:scriptedNavigate', { sessionId, action, url }),
   scriptedInput: (sessionId, inputEvent) =>

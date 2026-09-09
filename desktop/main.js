@@ -25,7 +25,7 @@ import { injectInput, inputAvailable, inputStatus } from './bridge/input.js';
 import { startStaticServer, packagedPublicDir } from './bridge/static-server.js';
 import {
   openScriptedBrowser, navigateScriptedBrowser, sendScriptedBrowserInput,
-  closeScriptedBrowser, closeAllScriptedBrowsers,
+  closeScriptedBrowser, closeAllScriptedBrowsers, resizeScriptedBrowser,
 } from './bridge/scripted-browser.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -370,6 +370,10 @@ function registerIpc() {
       },
     });
     return true;
+  });
+
+  ipcMain.on('proxvocx:scriptedResize', (_event, { sessionId, width, height }) => {
+    resizeScriptedBrowser(sessionId, width, height);
   });
 
   ipcMain.on('proxvocx:scriptedNavigate', (_event, { sessionId, action, url }) => {

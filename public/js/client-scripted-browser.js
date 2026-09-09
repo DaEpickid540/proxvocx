@@ -19,7 +19,7 @@ import { paths } from './paths.js';
 import { iceServers, attachIce, createSession, closeSession, waitForDescription } from './signaling.js';
 import {
   INPUT_CHANNEL, pointer, wheel, key, buttonFromEvent,
-  navGo, navBack, navForward, navReload,
+  navGo, navBack, navForward, navReload, pageAspect,
 } from './input-protocol.js';
 import { normaliseUrl } from './client-browser.js';
 
@@ -29,6 +29,9 @@ export function createScriptedBrowserViewer({ db, uid, getMachineId, elements, o
 
   let pc = null;
   let channel = null;
+  let shapeObserver = null;
+  let shapeTimer = null;
+  let lastAspect = 0;
   let sessionId = null;
   let detachIce = null;
   let screen = { width: 1280, height: 800 };
@@ -97,6 +100,7 @@ export function createScriptedBrowserViewer({ db, uid, getMachineId, elements, o
           overlay.hidden = true;
           stage.dataset.state = 'ready';
           finishLoading();
+          watchStageShape();
         } else if (['failed', 'closed', 'disconnected'].includes(st)) {
           teardownAndExplain(st === 'failed'
             ? 'The peer connection failed. The PC may be behind a network that needs a TURN relay.'
@@ -152,11 +156,51 @@ export function createScriptedBrowserViewer({ db, uid, getMachineId, elements, o
       for (const track of video.srcObject.getTracks()) track.stop();
       video.srcObject = null;
     }
+    stopWatchingShape();
     const machineId = getMachineId();
     if (machineId && sessionId) await closeSession(db, machineId, sessionId);
     sessionId = null;
     navStateKnown = false;
     stage.dataset.state = 'empty';
+  }
+
+  /* ── keeping the page the shape of the stage ───────────────────── */
+
+  /**
+   * The offscreen page is rendered at a fixed shape, so any stage that is not
+   * that shape shows the difference as black bars either side of the picture.
+   * Telling the host what ratio this stage actually is lets it spend the same
+   * pixel budget filling it instead.
+   *
+   * Sent on connect and on every resize that matters — entering fullscreen,
+   * rotating a phone, dragging a window. Re-rendering a live page is not free
+   * on the PC, hence the settle delay and the "worth it" threshold rather than
+   * a message per animation frame.
+   */
+  function sendStageShape() {
+    const rect = stage.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const ratio = rect.width / rect.height;
+    if (lastAspect && Math.abs(ratio - lastAspect) / lastAspect < 0.02) return;
+    lastAspect = ratio;
+    send(pageAspect(ratio));
+  }
+
+  function watchStageShape() {
+    sendStageShape();
+    if (shapeObserver || typeof ResizeObserver === 'undefined') return;
+    shapeObserver = new ResizeObserver(() => {
+      clearTimeout(shapeTimer);
+      shapeTimer = setTimeout(sendStageShape, 250);
+    });
+    shapeObserver.observe(stage);
+  }
+
+  function stopWatchingShape() {
+    clearTimeout(shapeTimer);
+    shapeObserver?.disconnect();
+    shapeObserver = null;
+    lastAspect = 0;
   }
 
   /* ── sending input ─────────────────────────────────────────────── */

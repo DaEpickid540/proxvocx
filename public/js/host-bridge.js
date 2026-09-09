@@ -188,6 +188,7 @@ export const hostBridge = {
 
     return {
       stream,
+      resize: (w, h) => native.scriptedResize?.(sessionId, w, h),
       navigate: (action, navUrl) => native.scriptedNavigate(sessionId, action, navUrl),
       sendInput: (event) => native.scriptedInput(sessionId, event),
       close() {

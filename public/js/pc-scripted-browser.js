@@ -116,7 +116,7 @@ export function startScriptedBrowserHost({ db, machineId, bridge, log, onStat, g
       }
     });
 
-    entry = { pc, scripted, channel, clientUid: session.clientUid, startedAt: Date.now() };
+    entry = { pc, scripted, channel, page, clientUid: session.clientUid, startedAt: Date.now() };
     active.set(sessionId, entry);
     onSessionChange?.(summary());
 
@@ -180,6 +180,12 @@ export function startScriptedBrowserHost({ db, machineId, bridge, log, onStat, g
       entry.scripted.navigate(event.a, event.url);
       return;
     }
+    // A shape request is not OS input and does not go near sendInput().
+    if (event.t === 'ar') {
+      const size = sizeForAspect(entry.page, event.v);
+      entry.scripted.resize(size.width, size.height);
+      return;
+    }
     try {
       await entry.scripted.sendInput(event);
     } catch (err) {
@@ -225,6 +231,28 @@ export function startScriptedBrowserHost({ db, machineId, bridge, log, onStat, g
       stopRemoved();
       this.endAll('the connector stopped');
     },
+  };
+}
+
+/**
+ * The configured page size, reshaped to the viewer's aspect ratio.
+ *
+ * The pixel count is held roughly constant, so the PC renders and encodes
+ * about as much as the chosen "Page size" asked for however wide or tall the
+ * viewer's stage happens to be — what changes is only the shape, which is what
+ * decides whether the picture fills the stage or arrives inside black bars.
+ * The bounds stop a very long or very narrow window turning a modest budget
+ * into an absurd viewport for the site being rendered. The tall end is
+ * generous enough to cover a phone held upright in fullscreen, which is
+ * otherwise the one common shape that would still show bars.
+ */
+function sizeForAspect({ width, height }, aspect) {
+  const pixels = width * height;
+  const even = (n) => Math.round(n / 2) * 2;
+  const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+  return {
+    width: clamp(even(Math.sqrt(pixels * aspect)), 640, 2560),
+    height: clamp(even(Math.sqrt(pixels / aspect)), 400, 2000),
   };
 }
 

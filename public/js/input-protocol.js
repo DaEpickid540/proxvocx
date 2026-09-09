@@ -25,6 +25,17 @@ export const setFps = (value) => ({ t: 'fps', v: value });
 /** Ask the host to switch which display it is capturing, without reconnecting. */
 export const switchDisplay = (id) => ({ t: 'disp', id: String(id) });
 
+/**
+ * Ask the scripted browser to re-render at this width/height ratio.
+ *
+ * A shape, not a size: how many pixels to spend is the PC's decision (its
+ * "Page size" setting is a rendering budget), while only the viewer knows what
+ * shape its stage is. Sending the ratio lets the host keep the budget and
+ * still hand back a picture that fills the stage instead of one letterboxed
+ * into it.
+ */
+export const pageAspect = (ratio) => ({ t: 'ar', v: Math.round(ratio * 1000) / 1000 });
+
 /** Wheel, in CSS-pixel-ish deltas the host scales to notches. */
 export const wheel = (x, y, dx, dy) =>
   ({ t: 'w', x: clamp01(x), y: clamp01(y), dx: Math.round(dx), dy: Math.round(dy) });
@@ -96,6 +107,8 @@ export function isValidEvent(event) {
       return Number.isFinite(event.v) && event.v >= 1 && event.v <= 240;
     case 'disp':
       return typeof event.id === 'string' && event.id.length > 0 && event.id.length <= 256;
+    case 'ar':
+      return Number.isFinite(event.v) && event.v >= 0.2 && event.v <= 5;
     case 'w':
       return isUnit(event.x) && isUnit(event.y)
         && Number.isFinite(event.dx) && Number.isFinite(event.dy);

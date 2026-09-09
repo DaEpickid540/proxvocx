@@ -65,7 +65,11 @@ export function openScriptedBrowser(sessionId, url, {
 
   win.webContents.setFrameRate(frameRate);
   win.webContents.on('paint', (_event, _dirty, image) => {
-    onFrame?.(image.toJPEG(quality), width, height);
+    // The frame's own size, not the size the window was opened at: those part
+    // company the moment resizeScriptedBrowser() is called, and the renderer
+    // sizes its canvas from whatever arrives here.
+    const size = image.getSize();
+    onFrame?.(image.toJPEG(quality), size.width, size.height);
   });
 
   const pushNavState = () => {
@@ -93,6 +97,22 @@ export function openScriptedBrowser(sessionId, url, {
   win.loadURL(url).catch((err) => {
     onNavState?.({ url, title: '', canGoBack: false, canGoForward: false, loading: false, error: err.message });
   });
+}
+
+/**
+ * Re-renders the tab at a new size, in place. The session keeps its window,
+ * its page and its history — this is a viewport change, not a reload — and the
+ * next paint simply arrives with different dimensions.
+ */
+export function resizeScriptedBrowser(sessionId, width, height) {
+  const entry = sessions.get(sessionId);
+  if (!entry || !Number.isFinite(width) || !Number.isFinite(height)) return;
+  if (entry.width === width && entry.height === height) return;
+  entry.width = width;
+  entry.height = height;
+  try {
+    entry.win.setSize(Math.round(width), Math.round(height));
+  } catch { /* window already gone */ }
 }
 
 export function navigateScriptedBrowser(sessionId, { action, url }) {

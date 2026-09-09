@@ -110,6 +110,13 @@ body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; 
   position: relative;
   background: var(--bg-inset);
 }
+/* Fullscreen paints the element's own background behind the picture, and
+   `--bg-inset` is a near-black grey that reads as washed-out letterboxing
+   next to real black. The scripted video already sits on #000; matching it
+   here means the bars that a stubborn aspect ratio still leaves are at least
+   the same colour as the frame around them. */
+.browser-stage:fullscreen { background: #000; }
+.browser-stage:-webkit-full-screen { background: #000; }
 .browser-frame {
   width: 100%;
   height: 100%;
