@@ -10,7 +10,7 @@
  * input data channel. The client is the *viewer*: it creates the session node
  * and answers.
  */
-import { ref, push, set, remove, onValue, onChildAdded } from './firebase.js';
+import { ref, push, set, remove, onValue, onChildAdded, onDisconnect } from './firebase.js';
 import { paths } from './paths.js';
 
 export const ICE_SERVERS = [
@@ -79,6 +79,56 @@ export function waitForDescription(db, path, timeoutMs = 30_000) {
   });
 }
 
+/* ── holding a session open ─────────────────────────────────────
+ *
+ * A session row is not bookkeeping: while one exists the connector has a
+ * screen capture running and a peer connection open, and the only way it
+ * learns to stop is the row disappearing (pc-control.js listens for
+ * onChildRemoved). Close the tab without removing it and the PC keeps
+ * capturing and encoding for nobody until the ten-minute stale sweep — which
+ * only runs when the connector next restarts, so in practice until it does.
+ *
+ * Two mechanisms, because neither is sufficient alone:
+ *
+ *   - `onDisconnect`, registered per session, is the one that always works.
+ *     The database server performs the delete on our behalf once our socket
+ *     drops, no matter how the tab went: closed, crashed, killed, or carried
+ *     out of signal range.
+ *   - `beforeunload` is what makes it a *deliberate* close, giving the browser
+ *     its "Leave site?" dialog so an accidental X doesn't silently drop a live
+ *     session. It is the courtesy, not the guarantee: it needs prior user
+ *     interaction to fire at all, and iOS Safari ignores it outright — which
+ *     is precisely why the onDisconnect above is not optional.
+ */
+
+/** Session database paths this tab is currently holding open. */
+const openSessions = new Map();
+
+function warnBeforeUnload(event) {
+  event.preventDefault();
+  // Safari and older Chrome ignore preventDefault() here unless returnValue is
+  // also set. The string itself is discarded — every current browser shows its
+  // own wording rather than anything we supply.
+  event.returnValue = '';
+}
+
+/**
+ * Best effort on a clean close. A remove() started here frequently does not
+ * outlive the page, which is what the onDisconnect registration is for; this
+ * just spares the PC the round trip when the tab does go quietly.
+ */
+function releaseOnPagehide() {
+  for (const { db, path } of openSessions.values()) remove(ref(db, path)).catch(() => {});
+}
+
+/** Armed only while at least one session is live — a page holding nothing
+ *  open has no business interrupting a navigation. */
+function syncUnloadGuards() {
+  const method = openSessions.size ? 'addEventListener' : 'removeEventListener';
+  window[method]('beforeunload', warnBeforeUnload);
+  window[method]('pagehide', releaseOnPagehide);
+}
+
 export async function createSession(db, machineId, clientUid, mode = 'control', extra = {}) {
   const node = push(ref(db, paths.sessions(machineId)));
   await set(node, {
@@ -88,12 +138,28 @@ export async function createSession(db, machineId, clientUid, mode = 'control', 
     createdAt: Date.now(),
     ...extra,
   });
+
+  // Registered before the caller is told the session exists, so there is no
+  // window in which a session is live with nothing arranged to clean it up.
+  await onDisconnect(node).remove().catch(() => {});
+
+  const path = paths.session(machineId, node.key);
+  openSessions.set(path, { db, path });
+  syncUnloadGuards();
+
   return node.key;
 }
 
 export function closeSession(db, machineId, sessionId) {
   if (!machineId || !sessionId) return Promise.resolve();
-  return remove(ref(db, paths.session(machineId, sessionId))).catch(() => {});
+  const path = paths.session(machineId, sessionId);
+  openSessions.delete(path);
+  syncUnloadGuards();
+  // Remove first so the PC hears immediately; cancelling afterwards just stops
+  // the server holding a delete for a row that has already gone.
+  return remove(ref(db, path))
+    .catch(() => {})
+    .then(() => onDisconnect(ref(db, path)).cancel().catch(() => {}));
 }
 
 /** Sessions nobody cleaned up — swept by the PC when it comes online. */
