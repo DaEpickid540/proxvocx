@@ -77,7 +77,7 @@ export function startScriptedBrowserHost({ db, machineId, bridge, log, onStat, g
     const page = {
       width: settings.scriptedWidth ?? 1600,
       height: settings.scriptedHeight ?? 1000,
-      frameRate: settings.scriptedFrameRate ?? 20,
+      frameRate: settings.scriptedFrameRate ?? 30,
       quality: settings.scriptedQuality ?? 92,
     };
 

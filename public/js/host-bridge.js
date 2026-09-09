@@ -158,7 +158,7 @@ export const hostBridge = {
    * periodically" into something WebRTC can treat as a video track.
    */
   async openScriptedBrowser(sessionId, url, {
-    width = 1600, height = 1000, frameRate = 20, quality = 92, onNavState,
+    width = 1600, height = 1000, frameRate = 30, quality = 92, onNavState,
   } = {}) {
     if (!native?.scriptedOpen) {
       throw new Error('the desktop app is required to run a scripted browser tab');
@@ -167,18 +167,73 @@ export const hostBridge = {
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    const stream = canvas.captureStream(frameRate);
+    const ctx = canvas.getContext('2d', { alpha: false });
+
+    /* Manual capture: exactly one captured frame per frame actually painted.
+       Sampling the canvas on its own timer instead means the capture clock and
+       the paint clock are never in step — every frame waits up to a full
+       sampling interval before it is picked up, and a still page is re-encoded
+       over and over for no reason. */
+    let stream = canvas.captureStream(0);
+    let [track] = stream.getVideoTracks();
+    if (typeof track?.requestFrame !== 'function') {
+      for (const t of stream.getTracks()) t.stop();
+      stream = canvas.captureStream(frameRate);
+      [track] = stream.getVideoTracks();
+    }
+
+    /* Only ever the newest frame, and only ever one decode at a time.
+     *
+     * Starting a decode per arriving frame — which is what this did — has two
+     * failure modes, and both of them read as lag rather than as dropped
+     * frames. Decodes that cannot keep up simply queue, so the delay between
+     * something happening on the page and it appearing here grows without
+     * bound: you end up watching the past. And `createImageBitmap` promises
+     * are not ordered with respect to each other, so a slow older frame can
+     * resolve after a fast newer one and paint the picture backwards.
+     *
+     * Holding one slot for the latest frame and draining it in a loop fixes
+     * both: what gets drawn is always the most recent frame that arrived, in
+     * order, and everything superseded while a decode was running is dropped
+     * without paying to decode it. */
+    let latest = null;
+    let decoding = false;
+
+    async function drainFrames() {
+      if (decoding) return;
+      decoding = true;
+      try {
+        while (latest) {
+          const frame = latest;
+          latest = null;
+          let bitmap;
+          try {
+            bitmap = await createImageBitmap(new Blob([frame.jpeg], { type: 'image/jpeg' }));
+          } catch {
+            continue; /* a corrupt frame is not worth failing the session over */
+          }
+          if (canvas.width !== frame.width) canvas.width = frame.width;
+          if (canvas.height !== frame.height) canvas.height = frame.height;
+          ctx.drawImage(bitmap, 0, 0);
+          bitmap.close();
+          track.requestFrame?.();
+        }
+      } finally {
+        decoding = false;
+      }
+    }
 
     const offFrame = native.onScriptedFrame(({ sessionId: id, jpeg, width: w, height: h }) => {
       if (id !== sessionId) return;
-      createImageBitmap(new Blob([jpeg], { type: 'image/jpeg' })).then((bitmap) => {
-        if (canvas.width !== w) canvas.width = w;
-        if (canvas.height !== h) canvas.height = h;
-        ctx.drawImage(bitmap, 0, 0);
-        bitmap.close();
-      }).catch(() => { /* a dropped frame is not worth failing the session over */ });
+      latest = { jpeg, width: w, height: h };
+      drainFrames();
     });
+
+    /* A page that is not repainting paints nothing, so under manual capture it
+       produces no frames at all — correct, and free, but it leaves nothing for
+       a receiver that joins or recovers mid-stillness to decode. One frame a
+       second is enough to keep that from being a black screen. */
+    const keepAlive = setInterval(() => { if (!decoding) track.requestFrame?.(); }, 1000);
 
     const offNav = native.onScriptedNavState(({ sessionId: id, ...state }) => {
       if (id === sessionId) onNavState?.(state);
@@ -192,10 +247,11 @@ export const hostBridge = {
       navigate: (action, navUrl) => native.scriptedNavigate(sessionId, action, navUrl),
       sendInput: (event) => native.scriptedInput(sessionId, event),
       close() {
+        clearInterval(keepAlive);
         offFrame();
         offNav();
         native.scriptedClose(sessionId);
-        for (const track of stream.getTracks()) track.stop();
+        for (const t of stream.getTracks()) t.stop();
       },
     };
   },

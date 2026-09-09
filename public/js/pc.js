@@ -50,7 +50,7 @@ const DEFAULT_SETTINGS = {
   // matching the shape the viewer's stage expects.
   scriptedWidth: 1600,
   scriptedHeight: 1000,
-  scriptedFrameRate: 20,
+  scriptedFrameRate: 30,
   scriptedQuality: 92,
   screenSourceId: null,
   autoLaunch: false,
@@ -506,9 +506,10 @@ async function openSettings() {
     ], Number);
 
     const pageFrameRate = settingSelect('scriptedFrameRate', [
-      [14, '14 fps · lightest'],
-      [20, '20 fps · balanced'],
-      [30, '30 fps · smoothest'],
+      [20, '20 fps · lightest'],
+      [30, '30 fps · balanced'],
+      [45, '45 fps · smoother'],
+      [60, '60 fps · heaviest on the PC'],
     ], Number);
 
     const display = sources.length
