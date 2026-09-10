@@ -589,6 +589,9 @@ async function main() {
       connectBtn: $('#connectControlBtn'),
       hint: $('#captureHint'),
     },
+    // The PC refusing or failing a capture change used to be visible only in
+    // the connector's own log, on the other machine.
+    onNotice: (message) => toast(`The PC could not apply that: ${message}`, 'danger', 7000),
     onState: ({
       connected, status, rtt, fps, canInput,
       sources, activeSourceId, frameRate, streamMode,

@@ -93,6 +93,30 @@ export const navReload = () => ({ t: 'n', a: 'reload' });
  * a real page can navigate on its own from a click inside the video, not
  * just from the URL bar.
  */
+/**
+ * Host → client only: what the capture is *actually* doing, sent after every
+ * attempt to change it.
+ *
+ * The viewer used to send `fps`, `disp` and `sm` into the dark and assume they
+ * landed. When one did not — the connector refusing because it cannot capture
+ * silently, a display id it does not recognise, `getUserMedia` failing on the
+ * new source — the only trace was a line in the connector's log, on the other
+ * machine, which is no use to the person watching a dropdown do nothing. The
+ * dropdowns are re-synced from this, so a change that did not take visibly
+ * snaps back instead of lying about the state it is in.
+ *
+ * Like `navState`, this is deliberately absent from `isValidEvent`: that gate
+ * guards the path from a viewer into the OS, and nothing a viewer sends should
+ * ever be accepted as one of these.
+ */
+export const configState = ({ sourceId, frameRate, streamMode, error } = {}) => ({
+  t: 'cfg',
+  ...(sourceId ? { id: String(sourceId) } : {}),
+  ...(Number.isFinite(frameRate) ? { fps: frameRate } : {}),
+  ...(streamMode ? { sm: String(streamMode) } : {}),
+  ...(error ? { err: String(error).slice(0, 200) } : {}),
+});
+
 export const navState = ({ url, title, canGoBack, canGoForward, loading }) =>
   ({ t: 'ns', url, title: String(title || '').slice(0, 200), canGoBack: !!canGoBack, canGoForward: !!canGoForward, loading: !!loading });
 

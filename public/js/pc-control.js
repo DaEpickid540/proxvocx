@@ -9,7 +9,7 @@
 import { ref, set, update, remove, onValue, onChildAdded, onChildRemoved, get } from './firebase.js';
 import { paths } from './paths.js';
 import { iceServers, attachIce, SESSION_MAX_AGE_MS } from './signaling.js';
-import { INPUT_CHANNEL, isValidEvent } from './input-protocol.js';
+import { INPUT_CHANNEL, isValidEvent, configState } from './input-protocol.js';
 import {
   CODEC_ORDERS, STREAM_MODES, bitrateFor, tuneSender, preferCodecs, applyBitrateHints,
 } from './video-tuning.js';
@@ -194,6 +194,28 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
     }
   }
 
+  /**
+   * Tells the viewer what the capture settled on — after every change, and
+   * whether or not it worked.
+   *
+   * Without this the viewer's dropdowns are write-only: they show what was
+   * asked for rather than what happened, so a refusal is indistinguishable
+   * from success and the only record is a log line on this machine.
+   */
+  function reportConfig(entry, error = null) {
+    if (entry.channel?.readyState !== 'open') return;
+    try {
+      entry.channel.send(JSON.stringify(configState({
+        sourceId: entry.sourceId,
+        frameRate: entry.frameRate,
+        streamMode: entry.streamMode,
+        error,
+      })));
+    } catch {
+      /* The channel went away mid-send; the session is ending anyway. */
+    }
+  }
+
   /* ── input replay ──────────────────────────────────────────── */
 
   async function onInputMessage(sessionId, raw) {
@@ -214,10 +236,15 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
     if (event.t === 'fps') return recapture(sessionId, entry, { frameRate: event.v });
     if (event.t === 'disp') return recapture(sessionId, entry, { sourceId: event.id });
     if (event.t === 'sm') {
-      if (!STREAM_MODES[event.v]) return undefined;
+      if (!STREAM_MODES[event.v]) return reportConfig(entry, `unknown stream mode "${event.v}"`);
       entry.streamMode = event.v;
-      log?.(`stream mode set to ${event.v}`, 'good');
-      return applyVideoTuning(entry);
+      try {
+        await applyVideoTuning(entry);
+        log?.(`stream mode set to ${event.v}`, 'good');
+        return reportConfig(entry);
+      } catch (err) {
+        return reportConfig(entry, err.message);
+      }
     }
 
     const settings = getSettings?.() || {};
@@ -249,9 +276,18 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
     // system picker every time — re-capturing there would put a dialog in
     // front of the user on every dropdown change, so leave it alone.
     if (!bridge.capabilities.captureSilent) {
-      log?.('changing the display or frame rate needs the desktop app', 'warn');
+      const why = 'the PC is running in a browser tab, which cannot change the capture without a picker';
+      log?.(`changing the display or frame rate needs the desktop app`, 'warn');
+      reportConfig(entry, why);
       return;
     }
+    // Kept so a failure can put them back. Applying the request up front is
+    // what lets the two settings be changed independently, but it also means
+    // a throw leaves the entry claiming settings that were never achieved —
+    // and `reportConfig` would then dutifully tell the viewer its broken
+    // change had worked.
+    const previousSourceId = entry.sourceId;
+    const previousFrameRate = entry.frameRate;
     if (sourceId !== undefined) entry.sourceId = sourceId;
     if (frameRate !== undefined) entry.frameRate = frameRate;
 
@@ -279,8 +315,15 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
       log?.(sourceId !== undefined
         ? 'switched display'
         : `frame rate set to ${entry.frameRate} fps`, 'good');
+      reportConfig(entry);
     } catch (err) {
       log?.(`could not reconfigure the capture: ${err.message}`, 'warn');
+      // The old capture is still the live one, so the old settings are still
+      // the true ones. Restore them before telling the viewer, or its dropdown
+      // snaps back to the very value that just failed.
+      entry.sourceId = previousSourceId;
+      entry.frameRate = previousFrameRate;
+      reportConfig(entry, err.message);
     }
   }
 

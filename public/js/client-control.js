@@ -22,7 +22,7 @@ const HIDE_HINT_KEY = 'proxvocx.hideEscHint';
 
 const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
 
-export function createControlViewer({ db, uid, getMachineId, elements, onState }) {
+export function createControlViewer({ db, uid, getMachineId, elements, onState, onNotice }) {
   const { stage, video, overlay, overlayTitle, overlayMessage, connectBtn, hint } = elements;
 
   let pc = null;
@@ -149,6 +149,7 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
       pc.addEventListener('datachannel', (event) => {
         if (event.channel.label !== INPUT_CHANNEL) return;
         channel = event.channel;
+        channel.addEventListener('message', onHostMessage);
         channel.addEventListener('close', () => { channel = null; });
       });
 
@@ -222,6 +223,29 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
     sources = [];
     activeSourceId = null;
     stage.dataset.state = 'idle';
+  }
+
+  /**
+   * The connector reporting what the capture actually settled on.
+   *
+   * This channel used to be one-way. The viewer asked for a frame rate, a
+   * display or a stream mode and then simply believed it had got one, so a
+   * refusal on the PC — no silent capture available, an unrecognised display
+   * id, a `getUserMedia` that failed on the new source — showed up here as a
+   * dropdown that moved and changed nothing. Now the dropdowns are re-synced
+   * from the PC's answer, which means a change that did not take snaps back
+   * and says why.
+   */
+  function onHostMessage(event) {
+    let message;
+    try { message = JSON.parse(event.data); } catch { return; }
+    if (message?.t !== 'cfg') return;
+
+    if (typeof message.id === 'string') activeSourceId = message.id;
+    if (Number.isFinite(message.fps)) captureFps = message.fps;
+    if (typeof message.sm === 'string') activeMode = message.sm;
+    emitState();
+    if (message.err) onNotice?.(message.err);
   }
 
   /* ── sending input ─────────────────────────────────────────── */
