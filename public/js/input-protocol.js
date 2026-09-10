@@ -49,6 +49,27 @@ export const key = (action, event) => ({
   m: modifierMask(event),
 });
 
+/**
+ * "Let go of everything you think is held."
+ *
+ * A viewer can only send a key-up for a key it actually saw released, and
+ * there are several ordinary ways it never sees that: the OS eats the release
+ * (a Chromebook's Search key opens the launcher and the page never gets the
+ * keyup), the browser claims the chord (Ctrl+W closes the tab), the window
+ * loses focus mid-chord, or capture is dropped with Escape while a modifier
+ * is down. Every one of those leaves a modifier latched *on the PC*, which is
+ * how an innocent "w" later becomes Win+W and the Windows widgets panel opens
+ * by itself. This is the reset, sent whenever the viewer stops being sure.
+ */
+export const keysUp = () => ({ t: 'ku' });
+
+/**
+ * Re-tune the encoder mid-session for a different kind of content, without
+ * reconnecting. Not input — it changes how the picture is coded, not what the
+ * PC does — so the host applies it even on a view-only session.
+ */
+export const streamMode = (value) => ({ t: 'sm', v: String(value) });
+
 /** A run of literal text — paste, or an IME commit. */
 export const text = (value) => ({ t: 'x', v: String(value).slice(0, 4096) });
 
@@ -114,6 +135,10 @@ export function isValidEvent(event) {
         && Number.isFinite(event.dx) && Number.isFinite(event.dy);
     case 'k':
       return ['down', 'up', 'press'].includes(event.a) && typeof event.code === 'string';
+    case 'ku':
+      return true;
+    case 'sm':
+      return typeof event.v === 'string' && event.v.length > 0 && event.v.length <= 24;
     case 'x':
     case 'c':
       return typeof event.v === 'string';

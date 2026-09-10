@@ -23,12 +23,25 @@
  * How the encoder should spend a bitrate it cannot stretch to cover
  * everything. Reading a desktop wants every pixel of the text even if the
  * frame rate sags; a game wants the opposite.
+ *
+ * `maintain-resolution` is worth reading as what it actually is: a standing
+ * refusal to ever send a smaller picture. When the link cannot carry 1080p60
+ * of screen content — which ordinary wifi frequently cannot — the encoder's
+ * only remaining answer is to send fewer frames, so the picture stays
+ * pin-sharp and moves in lurches. That is the right trade for reading a page
+ * and the wrong one for using a desktop, hence `balanced` sitting between the
+ * two rather than a choice between two extremes.
  */
 export const STREAM_MODES = {
   text: {
     label: 'Sharp text — best for reading, editors, browsing',
     contentHint: 'text',
     degradationPreference: 'maintain-resolution',
+  },
+  balanced: {
+    label: 'Balanced — sharp when it can be, smooth when it can’t',
+    contentHint: 'text',
+    degradationPreference: 'balanced',
   },
   motion: {
     label: 'Smooth motion — best for video and games',
@@ -102,8 +115,9 @@ export async function tuneSender(sender, { mode = 'text', frameRate = 30, maxBit
     encoding.active = true;
     encoding.maxBitrate = maxBitrate;
     encoding.maxFramerate = frameRate;
-    // Never trade resolution away silently — `degradationPreference` above is
-    // the one place that decision should be made.
+    // A *base* downscale applied before the encoder sees the frame — not a
+    // limit on congestion adaptation, which is `degradationPreference`'s job
+    // and happens on top of this. 1 means "start from the real resolution".
     encoding.scaleResolutionDownBy = 1;
     encoding.networkPriority = 'high';
     encoding.priority = 'high';

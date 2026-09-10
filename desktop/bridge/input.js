@@ -120,10 +120,46 @@ export async function injectInput(event, bounds) {
 
   switch (event.t) {
     case 'k': return keyEvent(nut, event);
+    case 'ku': return releaseAllKeys(nut);
     case 'x': return nut.keyboard.type(event.v);
     case 'c': return setClipboard(nut, event.v);
     default: return undefined;
   }
+}
+
+/**
+ * Keys this connector has pressed and not yet released.
+ *
+ * The viewer keeps its own list and is the first line of defence, but it can
+ * only ever release what it saw pressed — and it is exactly the events it
+ * never sees (a chord the browser or ChromeOS swallowed, a tab closed
+ * mid-keystroke, a connection that dropped between the down and the up) that
+ * strand a modifier here. This side is the one that knows the truth, because
+ * this side is the one that pressed the key.
+ */
+const pressedKeys = new Set();
+
+/** Lets go of everything, in reverse order of pressing. Never throws. */
+async function releaseAllKeys(nut) {
+  // Reversed so a chord comes apart the way a hand would: Ctrl+Shift+X lets
+  // go of X first, not of Ctrl, which would otherwise deliver a bare Shift+X
+  // to whatever is focused on the way out.
+  const keys = Array.from(pressedKeys).reverse();
+  pressedKeys.clear();
+  for (const mapped of keys) {
+    try {
+      await nut.keyboard.releaseKey(mapped);
+    } catch {
+      /* Already up, or the backend disagrees about this key — either way the
+         goal is "nothing held", so keep going through the rest. */
+    }
+  }
+}
+
+/** The connector is shutting down; do not leave the desktop holding keys. */
+export async function releaseAll() {
+  const nut = await loadBackend();
+  if (nut) await releaseAllKeys(nut);
 }
 
 let mouseQueue = Promise.resolve();
@@ -195,24 +231,72 @@ async function pointerRelEvent(nut, event) {
   await nut.mouse.setPosition(new nut.Point(Math.round(cachedPos.x), Math.round(cachedPos.y)));
 }
 
+/**
+ * Leftover scroll pixels that did not add up to a whole notch yet.
+ *
+ * Browsers report pixels and nut counts notches, and the old rounding gave
+ * *any* non-zero delta at least one full notch. A mouse wheel produces one
+ * ~100px delta per notch so that was invisible there, but a precision
+ * trackpad — every Chromebook — produces a stream of 2–10px deltas for the
+ * same gesture, each of which was being promoted to a whole notch. A gentle
+ * two-finger scroll therefore arrived on the PC as ten or twenty notches and
+ * the page shot past whatever you were reading. Carrying the remainder
+ * forward makes a hundred pixels of gesture equal a hundred pixels of scroll,
+ * however finely they were reported.
+ */
+const PIXELS_PER_NOTCH = 100;
+let scrollDebtX = 0;
+let scrollDebtY = 0;
+
 async function wheelEvent(nut, event, bounds) {
   const { x, y } = toPixels(event, bounds);
   cachedPos = { x, y };
   await nut.mouse.setPosition(new nut.Point(x, y));
 
-  // Browsers report pixels; nut counts notches. ~100px per notch is what a
-  // mouse wheel produces on every platform we care about.
-  const steps = (delta) => Math.max(1, Math.min(10, Math.round(Math.abs(delta) / 100) || 1));
+  // A reversal means a new gesture, and carrying the old one's leftovers into
+  // it would spend them in the wrong direction. Only an actual reversal: a
+  // zero delta on one axis is a scroll along the *other* one, not a change of
+  // mind about this one, and `Math.sign(0) === -Math.sign(0)` would otherwise
+  // read it as one and throw the gesture's progress away.
+  if (reversed(event.dy, scrollDebtY)) scrollDebtY = 0;
+  if (reversed(event.dx, scrollDebtX)) scrollDebtX = 0;
 
-  if (event.dy) {
-    if (event.dy > 0) await nut.mouse.scrollDown(steps(event.dy));
-    else await nut.mouse.scrollUp(steps(event.dy));
+  scrollDebtY += event.dy || 0;
+  scrollDebtX += event.dx || 0;
+
+  // Whole notches only; the fraction stays on the books for the next event.
+  // Clamped so a single flung gesture cannot ask for a hundred notches at
+  // once, which nut replays one blocking call at a time.
+  const take = (debt) => clamp(Math.trunc(debt / PIXELS_PER_NOTCH), -10, 10);
+
+  const stepsY = take(scrollDebtY);
+  if (stepsY) {
+    scrollDebtY = keepFraction(scrollDebtY - stepsY * PIXELS_PER_NOTCH);
+    if (stepsY > 0) await nut.mouse.scrollDown(stepsY);
+    else await nut.mouse.scrollUp(-stepsY);
   }
-  if (event.dx) {
-    if (event.dx > 0) await nut.mouse.scrollRight(steps(event.dx));
-    else await nut.mouse.scrollLeft(steps(event.dx));
+
+  const stepsX = take(scrollDebtX);
+  if (stepsX) {
+    scrollDebtX = keepFraction(scrollDebtX - stepsX * PIXELS_PER_NOTCH);
+    if (stepsX > 0) await nut.mouse.scrollRight(stepsX);
+    else await nut.mouse.scrollLeft(-stepsX);
   }
 }
+
+const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
+
+/**
+ * What is left over after the whole notches have been spent — but never more
+ * than one notch's worth. A hard fling reports thousands of pixels in a
+ * single event and the ±10 clamp above deliberately refuses to replay all of
+ * them at once; without this the unspent remainder would simply sit there and
+ * be added to whatever you scrolled next, minutes later.
+ */
+const keepFraction = (debt) => clamp(debt, -PIXELS_PER_NOTCH, PIXELS_PER_NOTCH);
+
+/** True only when `delta` genuinely pushes against an existing debt. */
+const reversed = (delta, debt) => !!delta && !!debt && (delta > 0) !== (debt > 0);
 
 async function keyEvent(nut, event) {
   const mapped = mapKey(nut, event.code, event.key);
@@ -223,9 +307,16 @@ async function keyEvent(nut, event) {
     }
     return undefined;
   }
-  if (event.a === 'down') return nut.keyboard.pressKey(mapped);
-  if (event.a === 'up') return nut.keyboard.releaseKey(mapped);
+  if (event.a === 'down') {
+    pressedKeys.add(mapped);
+    return nut.keyboard.pressKey(mapped);
+  }
+  if (event.a === 'up') {
+    pressedKeys.delete(mapped);
+    return nut.keyboard.releaseKey(mapped);
+  }
   await nut.keyboard.pressKey(mapped);
+  pressedKeys.delete(mapped);
   return nut.keyboard.releaseKey(mapped);
 }
 

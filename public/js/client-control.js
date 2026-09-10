@@ -15,7 +15,7 @@ import { paths } from './paths.js';
 import { iceServers, attachIce, createSession, closeSession, waitForDescription } from './signaling.js';
 import {
   INPUT_CHANNEL, pointer, pointerRel, wheel, key, text as textEvent, clipboard as clipboardEvent,
-  buttonFromEvent, setFps, switchDisplay,
+  buttonFromEvent, setFps, switchDisplay, keysUp, streamMode as streamModeEvent,
 } from './input-protocol.js';
 
 const HIDE_HINT_KEY = 'proxvocx.hideEscHint';
@@ -41,6 +41,13 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
   let hostAllowsInput = false;
   let screen = { width: 1920, height: 1080 };
   let sources = [];
+  // Which display the PC is actually capturing, and how it is coding it. Both
+  // come from the offer rather than being guessed here: the connector has its
+  // own saved settings, so the viewer's controls have to open showing what is
+  // really happening or the first change you make is a no-op against a value
+  // the dropdown only *looked* like it was already on.
+  let activeSourceId = null;
+  let activeMode = 'text';
   let captureFps = 60;
   let lastMoveSent = 0;
   // Deltas arriving faster than the ~120Hz send ceiling used to be dropped
@@ -54,6 +61,47 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
   let pendingDY = 0;
   const MAX_REL_DELTA = 350; // px/event — clamps any other single-event outlier
 
+  /**
+   * Every key we have told the PC to press and not yet told it to release.
+   *
+   * Without this the viewer can only release keys it personally watched go
+   * up, and there are several everyday ways it never does: ChromeOS eats the
+   * Search/Launcher key to open its own launcher (the page sees `MetaLeft`
+   * down and never the up), the browser keeps chords like Ctrl+W for itself,
+   * alt-tabbing away steals the release of whatever was held, and pressing
+   * Escape to drop capture used to swallow the release of every modifier
+   * being held at that moment. Each one latches a modifier *on Windows*,
+   * where it silently rewrites everything typed afterwards — a plain "w"
+   * becomes Win+W and the widgets/weather panel opens on its own.
+   */
+  const heldKeys = new Map(); // code -> key name
+
+  /**
+   * One place that knows the whole of what the UI needs, so a caller only has
+   * to say what changed.
+   *
+   * `onState` treats what it is handed as the entire truth and re-renders the
+   * toolbar from it, so every call site used to have to remember to re-send
+   * the standing session facts alongside its own news. Forgetting one made
+   * that control disappear or reset a couple of seconds later — the display
+   * picker did exactly that, and the stream/display dropdowns were losing
+   * their selection the same way.
+   */
+  function emitState(patch = {}) {
+    onState?.({
+      connected: !!pc && pc.connectionState === 'connected',
+      status: pc ? pc.connectionState : 'idle',
+      canInput: hostAllowsInput,
+      screen,
+      sources,
+      activeSourceId,
+      streamMode: activeMode,
+      frameRate: captureFps,
+      mouseLocked,
+      ...patch,
+    });
+  }
+
   /* ── connect ───────────────────────────────────────────────── */
 
   async function connect() {
@@ -66,7 +114,7 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
 
     showOverlay('Connecting…', 'Waiting for the PC to offer its screen.', false);
     stage.dataset.state = 'connecting';
-    onState?.({ connected: false, status: 'connecting' });
+    emitState({ connected: false, status: 'connecting' });
 
     try {
       sessionId = await createSession(db, machineId, uid, 'control');
@@ -75,6 +123,8 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
       screen = offer.screen || screen;
       hostAllowsInput = !!offer.capabilities?.input;
       sources = offer.sources || [];
+      activeSourceId = offer.activeSourceId || sources[0]?.id || null;
+      activeMode = offer.streamMode || activeMode;
       captureFps = offer.frameRate || captureFps;
 
       pc = new RTCPeerConnection({ iceServers: iceServers() });
@@ -82,6 +132,15 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
 
       pc.addEventListener('track', (event) => {
         video.srcObject = event.streams[0];
+        // Chromium's video jitter buffer is sized for watching video, where
+        // holding a few hundred milliseconds to smooth arrival is free. Here
+        // it is not free twice over: it is added to the hand-to-cursor delay,
+        // and because the buffer *grows* after a hiccup and then drains, it
+        // turns one late frame into a run of frames delivered in a lump —
+        // which is precisely what a stutter looks like. A remote desktop
+        // wants the frame as soon as it exists.
+        try { event.receiver.jitterBufferTarget = 0; } catch { /* pre-M115 */ }
+        try { event.receiver.playoutDelayHint = 0; } catch { /* not supported */ }
         video.play().catch(() => {
           /* Autoplay is allowed because the element is muted; ignore races. */
         });
@@ -98,14 +157,7 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
         if (st === 'connected') {
           overlay.hidden = true;
           stage.dataset.state = 'live';
-          onState?.({
-            connected: true,
-            status: 'connected',
-            canInput: hostAllowsInput,
-            screen,
-            sources,
-            frameRate: captureFps,
-          });
+          emitState({ connected: true, status: 'connected' });
           startStats();
         } else if (['failed', 'closed', 'disconnected'].includes(st)) {
           disconnect(st === 'failed'
@@ -125,7 +177,7 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
     } catch (err) {
       await teardown();
       showOverlay('Could not connect', err.message, true);
-      onState?.({ connected: false, status: 'failed' });
+      emitState({ connected: false, status: 'failed' });
     }
   }
 
@@ -136,7 +188,7 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
     await teardown();
     if (wasLive) {
       showOverlay('Disconnected', why, true);
-      onState?.({ connected: false, status: 'idle' });
+      emitState({ connected: false, status: 'idle' });
     }
   }
 
@@ -161,7 +213,14 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
     const machineId = getMachineId();
     if (machineId && sessionId) await closeSession(db, machineId, sessionId);
     sessionId = null;
+    // The display list belongs to the PC that offered it. Leaving it behind
+    // meant the next session — often on a different machine — opened its
+    // picker on the previous PC's monitors, and picking one sent that PC's
+    // source id to a host that had never heard of it. The host falls back to
+    // its first screen when it does not recognise an id, so the dropdown
+    // appeared to do nothing at all.
     sources = [];
+    activeSourceId = null;
     stage.dataset.state = 'idle';
   }
 
@@ -263,10 +322,13 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
       send(pointer('up', point.x, point.y, buttonFromEvent(event)));
     });
 
-    video.addEventListener('dblclick', (event) => {
-      const point = toScreenPoint(event);
-      if (point.inside) send(pointer('dblclick', point.x, point.y, buttonFromEvent(event)));
-    });
+    // No `dblclick` forwarding: the two press/release pairs that produce it
+    // have already been sent, and Windows decides for itself that two clicks
+    // that close together are a double click. Sending the dblclick as well
+    // replayed a *third* and *fourth* click on top, which is why a double
+    // click in a text field sometimes selected the whole line instead of the
+    // word, and why some double clicks opened two of whatever was clicked.
+    video.addEventListener('dblclick', (event) => event.preventDefault());
 
     // The remote desktop has its own context menu; never show the browser's.
     video.addEventListener('contextmenu', (event) => event.preventDefault());
@@ -275,7 +337,14 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
       const point = toScreenPoint(event);
       if (!point.inside) return;
       event.preventDefault();
-      send(wheel(point.x, point.y, event.deltaX, event.deltaY));
+      // The host works in pixels, but `deltaX/Y` are only pixels when
+      // `deltaMode` says so — a wheel reporting in lines or pages sends 3 or
+      // 1, which arrived as three pixels of scroll and looked like the wheel
+      // had stopped working.
+      const scale = event.deltaMode === 1 ? 33 // DOM_DELTA_LINE, ~one line
+        : event.deltaMode === 2 ? 400          // DOM_DELTA_PAGE
+          : 1;                                 // DOM_DELTA_PIXEL
+      send(wheel(point.x, point.y, event.deltaX * scale, event.deltaY * scale));
     }, { passive: false });
 
     window.addEventListener('keydown', onKeyDown, true);
@@ -298,7 +367,7 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
       }
       mouseLocked = nowLocked;
       stage.classList.toggle('mouse-locked', mouseLocked);
-      onState?.({ connected: !!pc, status: pc ? 'connected' : 'idle', canInput: hostAllowsInput, screen, sources, mouseLocked });
+      emitState();
     });
 
     // The same garbage-first-delta quirk shows up again after alt-tabbing
@@ -306,6 +375,17 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
     // pointerlockchange fires for that, since the lock state did not change.
     window.addEventListener('focus', () => {
       if (mouseLocked) skipNextMove = true;
+    });
+
+    // Losing the window mid-chord is the single most common way a modifier
+    // gets stranded on the PC: the keydown went out, and the keyup is
+    // delivered to whatever took focus instead of to us. ChromeOS does this
+    // every time the Search/Launcher key opens its launcher — the page sees
+    // `MetaLeft` go down and nothing else, and from then on every letter the
+    // PC receives is a Win-chord. Tab-switching hits the same path.
+    window.addEventListener('blur', releaseHeldKeys);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) releaseHeldKeys();
     });
   }
 
@@ -317,13 +397,30 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
       return;
     }
     event.preventDefault();
+    if (event.code) heldKeys.set(event.code, event.key);
     send(key('down', event));
   }
 
   function onKeyUp(event) {
     if (!captured) return;
     event.preventDefault();
+    if (event.code) heldKeys.delete(event.code);
     send(key('up', event));
+  }
+
+  /**
+   * Releases everything still held, then tells the host to drop its own idea
+   * of what is held too. Both halves matter: the per-key ups keep the two
+   * sides' bookkeeping in step, and `keysUp()` covers the keys the PC thinks
+   * are down that this viewer never knew about — a chord sent by a previous
+   * session, or one whose keydown we sent just before the channel dropped.
+   */
+  function releaseHeldKeys() {
+    for (const [code, keyName] of heldKeys) {
+      send({ t: 'k', a: 'up', key: keyName, code, m: 0 });
+    }
+    heldKeys.clear();
+    send(keysUp());
   }
 
   function hintDismissed() {
@@ -335,13 +432,20 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
     captured = true;
     stage.classList.add('captured');
     if (hint) hint.hidden = hintDismissed();
-    video.focus();
+    // `preventScroll` because the default is to scroll the element into view,
+    // and a scroll here moves the video's box out from under a pointer that
+    // has not moved — the next pointermove then maps to a different part of
+    // the remote screen and the PC's cursor jumps vertically for no reason.
+    video.focus({ preventScroll: true });
   }
 
   function releaseKeyboard() {
     if (document.pointerLockElement === video) document.exitPointerLock();
     if (!captured) return;
     captured = false;
+    // Before `captured` stops us forwarding anything, hand back whatever is
+    // still down — otherwise dropping capture mid-chord latches it on the PC.
+    releaseHeldKeys();
     stage.classList.remove('captured');
     if (hint) hint.hidden = true;
   }
@@ -364,14 +468,7 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
             fps = Math.round(entry.framesPerSecond || 0);
           }
         });
-        // `sources` and `mouseLocked` have to ride along on every update: this
-        // fires every couple of seconds, and onState treats what it is handed
-        // as the whole truth — omitting them made the display picker vanish two
-        // seconds after connecting.
-        onState?.({
-          connected: true, status: 'connected', rtt, fps,
-          canInput: hostAllowsInput, screen, sources, mouseLocked,
-        });
+        emitState({ connected: true, status: 'connected', rtt, fps });
       } catch {
         /* getStats can throw during teardown */
       }
@@ -421,16 +518,38 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
       if (document.pointerLockElement === video) document.exitPointerLock();
     },
 
-    /** Taps a key not present on the local keyboard — e.g. a Chromebook's
-     *  missing function row. `mods` may set ctrl/alt/shift/meta. */
+    /**
+     * Taps a key this keyboard does not have — a Chromebook's missing
+     * function row, or a chord the browser keeps for itself.
+     *
+     * The modifiers are pressed and released as real keys rather than being
+     * described in the event's modifier mask. The host replays one key per
+     * event and has no use for the mask (for ordinary typing the modifier's
+     * own keydown has already been sent, which is why it never needed one),
+     * so a mask was the one part of this that went nowhere: `Alt+Tab` arrived
+     * at the PC as a bare Tab.
+     *
+     * Released in reverse, and always — including if a send fails partway —
+     * because the whole point of the pad is to reach keys without holding
+     * anything down on this side.
+     */
     sendKeyTap(code, keyName, mods = {}) {
       if (!hostAllowsInput) return;
-      const synthetic = {
-        key: keyName, code,
-        ctrlKey: !!mods.ctrl, altKey: !!mods.alt, shiftKey: !!mods.shift, metaKey: !!mods.meta,
-      };
-      send(key('down', synthetic));
-      send(key('up', synthetic));
+      const modKeys = [
+        mods.ctrl && ['ControlLeft', 'Control'],
+        mods.alt && ['AltLeft', 'Alt'],
+        mods.shift && ['ShiftLeft', 'Shift'],
+        mods.meta && ['MetaLeft', 'Meta'],
+      ].filter(Boolean);
+
+      for (const [modCode, modName] of modKeys) {
+        send({ t: 'k', a: 'down', key: modName, code: modCode, m: 0 });
+      }
+      send({ t: 'k', a: 'down', key: keyName, code, m: 0 });
+      send({ t: 'k', a: 'up', key: keyName, code, m: 0 });
+      for (const [modCode, modName] of [...modKeys].reverse()) {
+        send({ t: 'k', a: 'up', key: modName, code: modCode, m: 0 });
+      }
     },
 
     /** Changes the live capture frame rate without dropping the session. */
@@ -441,7 +560,19 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState }
 
     /** Switches which display the host is capturing without reconnecting. */
     switchDisplay(id) {
+      activeSourceId = id;
       sendConfig(switchDisplay(id));
+    },
+
+    /**
+     * Re-tunes the encoder for the kind of thing on screen. Worth having on
+     * this side and not only in the connector's own settings: which trade-off
+     * is right changes with what you are doing — and with the link you happen
+     * to be on — far more often than anyone will walk over to the PC to say so.
+     */
+    setStreamMode(mode) {
+      activeMode = mode;
+      sendConfig(streamModeEvent(mode));
     },
 
     dismissHint() {

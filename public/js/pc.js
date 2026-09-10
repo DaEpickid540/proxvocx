@@ -43,7 +43,11 @@ const DEFAULT_SETTINGS = {
   // frames that actually changed, so on a mostly-still screen the extra 30 are
   // close to free.
   frameRate: 60,
-  streamMode: 'text',
+  // 'text' refuses to ever reduce resolution, so the first congestion is paid
+  // for entirely in frame rate — which on ordinary wifi is most of the time,
+  // and reads as a sharp picture that moves in lurches. 'balanced' is the
+  // better default for driving a desktop; 'text' is still there for reading.
+  streamMode: 'balanced',
   codec: 'auto',
   // Browser mode with JavaScript on. The page is rendered offscreen at this
   // size, so it is both the sharpness and the layout the site sees — 16:10,
@@ -474,6 +478,7 @@ async function openSettings() {
 
     const streamMode = settingSelect('streamMode', [
       ['text', 'Sharp text · reading, editors, browsing'],
+      ['balanced', 'Balanced · sharp when the link allows'],
       ['motion', 'Smooth motion · video and games'],
     ]);
 

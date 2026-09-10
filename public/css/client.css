@@ -238,6 +238,20 @@ body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; 
 .control-stage[data-state="connecting"] .control-video,
 .control-stage[data-state="idle"] .control-video { display: none; }
 
+/* Fixed height, and it never wraps.
+ *
+ * `flex-wrap: wrap` here was a live layout bug rather than a cosmetic choice.
+ * The stage above is `flex: 1`, so the toolbar's height sets the video's
+ * height — and the toolbar's contents change size while you are using it: the
+ * latency readout goes from "not connected" to "24 ms · 60 fps", the display
+ * picker appears once the PC's monitors are known. On a narrow screen — a
+ * Chromebook, which is exactly where this gets used — those changes were
+ * enough to push the row over the wrap threshold and back. Each wrap resized
+ * the video, which moved the picture under a stationary pointer, which the
+ * next pointermove mapped to a different place on the remote screen: the PC's
+ * cursor jerked up or down on its own. Scrolling the row is the honest answer
+ * to "too many controls for the width".
+ */
 .control-toolbar {
   flex-shrink: 0;
   display: flex;
@@ -246,9 +260,13 @@ body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; 
   padding: 8px 14px;
   background: var(--bg-card);
   border-top: 1px solid var(--border);
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  min-height: 46px;
 }
-.control-toolbar .spacer { flex: 1; }
+.control-toolbar > * { flex-shrink: 0; }
+.control-toolbar .spacer { flex: 1 0 8px; }
 
 .latency {
   font-size: 0.67rem;
@@ -256,7 +274,12 @@ body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; 
   font-variant-numeric: tabular-nums;
   display: inline-flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 5px;
+  /* Reserved so the text growing from "not connected" to "24 ms · 60 fps"
+     cannot push the row wider — see the note on the toolbar above. */
+  min-width: 124px;
+  white-space: nowrap;
 }
 .latency-dot {
   width: 6px; height: 6px;
@@ -283,6 +306,57 @@ body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; 
    one unrecognised pseudo-class would drop the whole list. */
 .control-stage:fullscreen.captured::after { content: none; }
 .control-stage:-webkit-full-screen.captured::after { content: none; }
+/* ── on-screen keys ──────────────────────────────────────────── */
+/* Absolutely positioned over the picture on purpose: a panel that pushed the
+   toolbar taller would resize the video and move the remote cursor, which is
+   the same failure the toolbar rules above exist to prevent. */
+.key-pad {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 10px;
+  background: rgba(12, 12, 14, 0.92);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  backdrop-filter: blur(6px);
+  max-height: 45%;
+  overflow-y: auto;
+}
+.key-pad-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+}
+.key-pad-label {
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  width: 100%;
+  margin-top: 2px;
+}
+.key-cap {
+  min-width: 34px;
+  padding: 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text-2);
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+  transition: border-color var(--tr), color var(--tr), background var(--tr);
+}
+.key-cap:hover { border-color: var(--accent); color: var(--accent); }
+.key-cap:active { background: var(--accent); color: #000; }
+/* The pad occupies the strip the hint sits in; the hint's job is done by then
+   anyway, since taking a key from the pad is not how you'd lose the keyboard. */
+.control-stage.keys-open .capture-hint { display: none; }
+
 .capture-hint {
   position: absolute;
   bottom: 14px;

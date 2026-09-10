@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 
 import { fetchThroughProxy, FetchFailedError } from './bridge/fetcher.js';
 import { UrlRejectedError } from './bridge/safe-url.js';
-import { injectInput, inputAvailable, inputStatus } from './bridge/input.js';
+import { injectInput, inputAvailable, inputStatus, releaseAll } from './bridge/input.js';
 import { startStaticServer, packagedPublicDir } from './bridge/static-server.js';
 import {
   openScriptedBrowser, navigateScriptedBrowser, sendScriptedBrowserInput,
@@ -449,6 +449,9 @@ if (!app.requestSingleInstanceLock()) {
   app.on('before-quit', async () => {
     quitting = true;
     closeAllScriptedBrowsers();
+    // Quitting with a remote key still held would leave it held on this
+    // desktop with nothing left running that could ever release it.
+    await releaseAll().catch(() => {});
     await staticServer?.close().catch(() => {});
   });
 }

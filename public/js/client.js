@@ -363,17 +363,99 @@ function setMode(mode) {
  * Fills the display picker from the monitors the connector reported. Only the
  * desktop app can switch silently, so a browser-hosted connector sends an
  * empty list and the control stays hidden.
+ *
+ * Keyed on the source ids rather than on how many there are. Counting was
+ * enough to notice a PC with one monitor becoming a PC with two, and nothing
+ * else — connect to a *different* two-monitor PC and the picker kept the
+ * first machine's options, so choosing one sent an id the new host had never
+ * issued. The host quietly falls back to its first screen when it does not
+ * recognise an id, so from this side the dropdown simply did nothing.
+ *
+ * `activeId` matters just as much: a picker showing the wrong entry cannot be
+ * used to select the right one, because the entry you want is already the one
+ * displayed and choosing it fires no change event at all.
  */
-function fillDisplays(sources) {
+function fillDisplays(sources, activeId) {
   const select = $('#controlDisplay');
-  if (select.dataset.filled === String(sources.length) && sources.length) return;
-  select.dataset.filled = String(sources.length);
-  select.replaceChildren(...sources.map((source) => {
-    const option = document.createElement('option');
-    option.value = source.id;
-    option.textContent = source.name;
-    return option;
-  }));
+  const signature = sources.map((source) => source.id).join('|');
+  if (select.dataset.filled !== signature) {
+    select.dataset.filled = signature;
+    select.replaceChildren(...sources.map((source) => {
+      const option = document.createElement('option');
+      option.value = source.id;
+      option.textContent = source.name;
+      return option;
+    }));
+  }
+  // Only when it disagrees: assigning `value` while the dropdown is open
+  // closes it out from under the user.
+  if (activeId && select.value !== activeId) select.value = activeId;
+}
+
+/**
+ * Keys a Chromebook does not physically have, or that ChromeOS keeps for
+ * itself before the page ever sees them.
+ *
+ * The function row is the obvious gap — a Chromebook has back/forward/reload
+ * and brightness where F1–F12 live, and those top-row keys are handled by
+ * ChromeOS itself and never reach a web page. But the ones that actually
+ * strand people are Search/Launcher (the page sees `MetaLeft` go down, then
+ * ChromeOS opens its launcher and the release is delivered somewhere else)
+ * and the chords the browser keeps, like Alt+Tab. Sending those as a single
+ * synthesised tap sidesteps the local keyboard entirely: nothing is held on
+ * this side, so nothing can be stranded held on the PC.
+ */
+const KEY_PAD = [
+  ['Function row', [
+    ...Array.from({ length: 12 }, (_, i) => [`F${i + 1}`, `F${i + 1}`, `F${i + 1}`]),
+  ]],
+  ['Windows', [
+    ['Win', 'MetaLeft', 'Meta'],
+    ['Win+D', 'KeyD', 'd', { meta: true }],
+    ['Win+E', 'KeyE', 'e', { meta: true }],
+    ['Win+L', 'KeyL', 'l', { meta: true }],
+    ['Alt+Tab', 'Tab', 'Tab', { alt: true }],
+    ['Alt+F4', 'F4', 'F4', { alt: true }],
+  ]],
+  ['Editing', [
+    ['Esc', 'Escape', 'Escape'],
+    ['Tab', 'Tab', 'Tab'],
+    ['Del', 'Delete', 'Delete'],
+    ['Ins', 'Insert', 'Insert'],
+    ['Home', 'Home', 'Home'],
+    ['End', 'End', 'End'],
+    ['PgUp', 'PageUp', 'PageUp'],
+    ['PgDn', 'PageDown', 'PageDown'],
+    ['PrtScn', 'PrintScreen', 'PrintScreen'],
+  ]],
+];
+
+function buildKeyPad() {
+  const pad = $('#controlKeys');
+  const nodes = [];
+  for (const [label, keys] of KEY_PAD) {
+    nodes.push(el('div', { class: 'key-pad-label' }, label));
+    nodes.push(el('div', { class: 'key-pad-group' }, ...keys.map(([caption, code, keyName, mods]) => {
+      const cap = el('button', { class: 'key-cap', title: caption }, caption);
+      // `mousedown`, not `click`: a click would move focus to the button and
+      // the video would lose the keyboard capture the key is meant to reach.
+      cap.addEventListener('mousedown', (event) => {
+        event.preventDefault();
+        state.control?.sendKeyTap(code, keyName, mods || {});
+      });
+      return cap;
+    })));
+  }
+  pad.replaceChildren(...nodes);
+}
+
+function toggleKeyPad(force) {
+  const pad = $('#controlKeys');
+  const open = force ?? pad.hidden;
+  pad.hidden = !open;
+  $('#controlKeysBtn').setAttribute('aria-expanded', String(open));
+  $('#controlKeysBtn').classList.toggle('active', open);
+  $('#controlStage').classList.toggle('keys-open', open);
 }
 
 /* ── account ─────────────────────────────────────────────────── */
@@ -507,15 +589,22 @@ async function main() {
       connectBtn: $('#connectControlBtn'),
       hint: $('#captureHint'),
     },
-    onState: ({ connected, status, rtt, fps, canInput, sources, frameRate }) => {
+    onState: ({
+      connected, status, rtt, fps, canInput,
+      sources, activeSourceId, frameRate, streamMode,
+    }) => {
       $('#controlDisconnect').disabled = !connected;
       $('#controlCtrlAltDel').disabled = !connected || !canInput;
       $('#controlPasteBtn').disabled = !connected || !canInput;
-      // Frame rate and display are capture settings, not input, so they stay
-      // available on a view-only session.
+      $('#controlKeysBtn').disabled = !connected || !canInput;
+      if (!connected || !canInput) toggleKeyPad(false);
+      // Frame rate, stream mode and display are capture settings, not input,
+      // so they stay available on a view-only session.
       $('#controlFps').disabled = !connected;
+      $('#controlMode').disabled = !connected;
       if (frameRate) $('#controlFps').value = String(frameRate);
-      if (sources) fillDisplays(sources);
+      if (streamMode) $('#controlMode').value = streamMode;
+      if (sources) fillDisplays(sources, activeSourceId);
       $('#controlDisplay').hidden = !connected || !sources?.length;
 
       const dot = $('#latencyDot');
@@ -565,6 +654,11 @@ async function main() {
   $('#controlDisplay').addEventListener('change', (event) => {
     state.control.switchDisplay(event.target.value);
   });
+  $('#controlMode').addEventListener('change', (event) => {
+    state.control.setStreamMode(event.target.value);
+  });
+  buildKeyPad();
+  $('#controlKeysBtn').addEventListener('click', () => toggleKeyPad());
   $('#controlFullscreen').addEventListener('click', () => {
     const stage = $('#controlStage');
     if (document.fullscreenElement) document.exitFullscreen();

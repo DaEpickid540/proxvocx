@@ -11,7 +11,7 @@ import { paths } from './paths.js';
 import { iceServers, attachIce, SESSION_MAX_AGE_MS } from './signaling.js';
 import { INPUT_CHANNEL, isValidEvent } from './input-protocol.js';
 import {
-  CODEC_ORDERS, bitrateFor, tuneSender, preferCodecs, applyBitrateHints,
+  CODEC_ORDERS, STREAM_MODES, bitrateFor, tuneSender, preferCodecs, applyBitrateHints,
 } from './video-tuning.js';
 
 export function startControlHost({ db, machineId, bridge, log, onStat, getSettings, onSessionChange }) {
@@ -135,8 +135,12 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
         input: bridge.capabilities.input && settings.allowInput !== false,
       },
       sources: sources.map((s) => ({ id: s.id, name: s.name })),
-      // So the viewer's frame-rate control opens showing what is actually
-      // being captured rather than its own guess.
+      // So the viewer's controls open showing what is actually being captured
+      // rather than their own guess. A dropdown that opens on the wrong entry
+      // is worse than no dropdown: the setting you want is already selected,
+      // so choosing it fires no change event and nothing happens.
+      activeSourceId: entry.sourceId,
+      streamMode,
       frameRate,
     });
     await update(ref(db, paths.session(machineId, sessionId)), { state: 'offered' });
@@ -204,10 +208,17 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
     }
     if (!isValidEvent(event)) return;
 
-    // These two reconfigure the live capture rather than the OS input state,
-    // so they run regardless of the allowInput setting — they are not input.
+    // These three reconfigure how the picture is captured and coded rather
+    // than the OS input state, so they run regardless of the allowInput
+    // setting — they are not input.
     if (event.t === 'fps') return recapture(sessionId, entry, { frameRate: event.v });
     if (event.t === 'disp') return recapture(sessionId, entry, { sourceId: event.id });
+    if (event.t === 'sm') {
+      if (!STREAM_MODES[event.v]) return undefined;
+      entry.streamMode = event.v;
+      log?.(`stream mode set to ${event.v}`, 'good');
+      return applyVideoTuning(entry);
+    }
 
     const settings = getSettings?.() || {};
     if (settings.allowInput === false || !bridge.capabilities.input) return;
@@ -279,6 +290,12 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
     const entry = active.get(sessionId);
     if (!entry) return;
     active.delete(sessionId);
+
+    // A session that drops while a key is held leaves that key held on the
+    // real desktop, with nobody left to send the release — the viewer is
+    // already gone. Everything typed at the PC afterwards then arrives as a
+    // chord, which is a genuinely alarming thing to walk back to.
+    bridge.injectInput({ t: 'ku' }).catch(() => { /* no native input backend */ });
 
     entry.stopAnswer?.();
     entry.detachIce?.();
