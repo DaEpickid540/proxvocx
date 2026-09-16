@@ -136,6 +136,10 @@ option { background: var(--bg-inset); color: var(--text); }
 
 .btn--ghost { background: none; border-color: var(--border); color: var(--text-3); }
 .btn--ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+/* A ghost button that is currently *on* — a mode the page is in, not an action
+   waiting to be taken, so it holds the accent instead of only borrowing it on
+   hover. */
+.btn--active:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
 
 .btn--danger { background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger); }
 .btn--danger:hover:not(:disabled) { background: var(--danger); color: #fff; }

@@ -391,6 +391,14 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState, 
       }
       mouseLocked = nowLocked;
       stage.classList.toggle('mouse-locked', mouseLocked);
+      // Escape releases both at once, and while the mouse is captured that is
+      // the only way back — worth saying, since the pointer cannot reach the
+      // toolbar to click the button that turned it on.
+      if (hint) {
+        hint.textContent = nowLocked
+          ? 'Press Esc to release the mouse and keyboard'
+          : 'Press Esc to release the keyboard';
+      }
       emitState();
     });
 

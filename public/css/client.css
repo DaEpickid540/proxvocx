@@ -357,6 +357,12 @@ body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; 
    anyway, since taking a key from the pad is not how you'd lose the keyboard. */
 .control-stage.keys-open .capture-hint { display: none; }
 
+/* Under Pointer Lock the real cursor is hidden by the browser anyway, but the
+   stage keeps drawing its own over the video — two cursors, one of which does
+   not move. Hide ours and let the remote one be the only pointer on screen. */
+.control-stage.mouse-locked,
+.control-stage.mouse-locked video { cursor: none; }
+
 .capture-hint {
   position: absolute;
   bottom: 14px;

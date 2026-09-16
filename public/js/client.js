@@ -366,8 +366,17 @@ function setMode(mode) {
  */
 let lastControlState = {};
 
-/** Frame-rate stops offered by the slider. The protocol accepts 1–240. */
-const FPS_STOPS = [15, 30, 45, 60];
+/**
+ * Frame-rate stops offered by the slider. The protocol accepts 1–240, and
+ * `bitrateFor()` scales the encoder ceiling with the rate — 144fps at 1080p
+ * asks for ~18 Mbps, still under the 25 Mbps cap it clamps to.
+ *
+ * Whether the PC can actually deliver the top of this range is a separate
+ * question from whether it will accept the number: the capture, the encoder
+ * and the link all have to keep up, and the host reports back what it settled
+ * on rather than what it was asked for.
+ */
+const FPS_STOPS = [15, 30, 60, 90, 120, 144];
 
 /**
  * The Stream settings modal: monitor, frame rate, and what the picture is
@@ -672,13 +681,21 @@ async function main() {
     onNotice: (message) => toast(`The PC could not apply that: ${message}`, 'danger', 7000),
     onState: ({
       connected, status, rtt, fps, canInput,
-      sources, activeSourceId, frameRate, streamMode,
+      sources, activeSourceId, frameRate, streamMode, mouseLocked,
     }) => {
       $('#controlDisconnect').disabled = !connected;
       $('#controlCtrlAltDel').disabled = !connected || !canInput;
       $('#controlPasteBtn').disabled = !connected || !canInput;
       $('#controlKeysBtn').disabled = !connected || !canInput;
       if (!connected || !canInput) toggleKeyPad(false);
+
+      // The browser can drop the lock on its own (Escape, alt-tab), so the
+      // button follows the real lock state rather than its own last click.
+      const lockBtn = $('#controlLockBtn');
+      lockBtn.disabled = !connected || !canInput;
+      lockBtn.setAttribute('aria-pressed', String(!!mouseLocked));
+      lockBtn.textContent = mouseLocked ? 'Mouse locked' : 'Lock mouse';
+      lockBtn.classList.toggle('btn--active', !!mouseLocked);
       // Frame rate, stream mode and monitor are capture settings, not input,
       // so they stay available on a view-only session.
       lastControlState = { connected, sources, activeSourceId, frameRate, streamMode };
@@ -726,6 +743,16 @@ async function main() {
     toast(sent ? 'Clipboard sent to the PC' : 'Could not read the clipboard', sent ? 'success' : 'danger');
   });
   $('#controlStreamBtn').addEventListener('click', () => openStreamModal());
+
+  // Pointer Lock is what turns cursor positions into raw motion. Without it a
+  // game that captures the mouse only ever sees the cursor walk to the edge of
+  // the screen and stop, which reads as the view refusing to turn past about a
+  // half-turn. The lock has to start from a real click — browsers refuse it
+  // otherwise — so it is a button rather than something applied on connect.
+  $('#controlLockBtn').addEventListener('click', () => {
+    if (state.control.mouseLocked) state.control.unlockMouse();
+    else state.control.lockMouse();
+  });
   buildKeyPad();
   $('#controlKeysBtn').addEventListener('click', () => toggleKeyPad());
   $('#controlFullscreen').addEventListener('click', () => {
