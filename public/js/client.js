@@ -689,17 +689,25 @@ async function main() {
       $('#controlKeysBtn').disabled = !connected || !canInput;
       if (!connected || !canInput) toggleKeyPad(false);
 
-      // The browser can drop the lock on its own (Escape, alt-tab), so the
-      // button follows the real lock state rather than its own last click.
+      // Every lookup here is null-guarded on purpose. onState runs inside
+      // connect(), so a TypeError on one missing button does not just skip a
+      // label — it aborts the rest of the connect sequence, bindInput()
+      // included. The session still reaches 'connected' at both ends and then
+      // accepts no input at all, which is a miserable thing to debug. A
+      // browser holding a cached index.html against freshly deployed JS is
+      // enough to cause it, and that is not in this page's gift to prevent.
       const lockBtn = $('#controlLockBtn');
-      lockBtn.disabled = !connected || !canInput;
-      lockBtn.setAttribute('aria-pressed', String(!!mouseLocked));
-      lockBtn.textContent = mouseLocked ? 'Mouse locked' : 'Lock mouse';
-      lockBtn.classList.toggle('btn--active', !!mouseLocked);
+      if (lockBtn) {
+        lockBtn.disabled = !connected || !canInput;
+        lockBtn.setAttribute('aria-pressed', String(!!mouseLocked));
+        lockBtn.textContent = mouseLocked ? 'Mouse locked' : 'Lock mouse';
+        lockBtn.classList.toggle('btn--active', !!mouseLocked);
+      }
       // Frame rate, stream mode and monitor are capture settings, not input,
       // so they stay available on a view-only session.
       lastControlState = { connected, sources, activeSourceId, frameRate, streamMode };
-      $('#controlStreamBtn').disabled = !connected;
+      const streamBtn = $('#controlStreamBtn');
+      if (streamBtn) streamBtn.disabled = !connected;
 
       const dot = $('#latencyDot');
       dot.className = 'latency-dot';
@@ -742,14 +750,14 @@ async function main() {
     const sent = await state.control.sendClipboard();
     toast(sent ? 'Clipboard sent to the PC' : 'Could not read the clipboard', sent ? 'success' : 'danger');
   });
-  $('#controlStreamBtn').addEventListener('click', () => openStreamModal());
+  $('#controlStreamBtn')?.addEventListener('click', () => openStreamModal());
 
   // Pointer Lock is what turns cursor positions into raw motion. Without it a
   // game that captures the mouse only ever sees the cursor walk to the edge of
   // the screen and stop, which reads as the view refusing to turn past about a
   // half-turn. The lock has to start from a real click — browsers refuse it
   // otherwise — so it is a button rather than something applied on connect.
-  $('#controlLockBtn').addEventListener('click', () => {
+  $('#controlLockBtn')?.addEventListener('click', () => {
     if (state.control.mouseLocked) state.control.unlockMouse();
     else state.control.lockMouse();
   });
