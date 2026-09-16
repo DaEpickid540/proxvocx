@@ -65,7 +65,11 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
     log?.(`incoming control session ${sessionId.slice(0, 6)}`, 'good');
 
     const frameRate = settings.frameRate ?? 60;
-    const streamMode = settings.streamMode ?? 'text';
+    // Matches DEFAULT_SETTINGS in pc.js. 'text' was the wrong thing to fall
+    // back to: it never reduces resolution, so congestion is paid for entirely
+    // in frame rate and the picture moves in lurches — the opposite of what a
+    // caller who supplied no preference at all is likely to want.
+    const streamMode = settings.streamMode ?? 'balanced';
     const stream = await bridge.captureScreen({
       sourceId: settings.screenSourceId || null,
       maxHeight: settings.maxHeight ?? 1080,
