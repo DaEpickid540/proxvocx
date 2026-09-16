@@ -360,36 +360,114 @@ function setMode(mode) {
 }
 
 /**
- * Fills the display picker from the monitors the connector reported. Only the
- * desktop app can switch silently, so a browser-hosted connector sends an
- * empty list and the control stays hidden.
- *
- * Keyed on the source ids rather than on how many there are. Counting was
- * enough to notice a PC with one monitor becoming a PC with two, and nothing
- * else — connect to a *different* two-monitor PC and the picker kept the
- * first machine's options, so choosing one sent an id the new host had never
- * issued. The host quietly falls back to its first screen when it does not
- * recognise an id, so from this side the dropdown simply did nothing.
- *
- * `activeId` matters just as much: a picker showing the wrong entry cannot be
- * used to select the right one, because the entry you want is already the one
- * displayed and choosing it fires no change event at all.
+ * The last state the control viewer reported, kept so the Stream modal can be
+ * built from current values at the moment it opens rather than from whatever
+ * the toolbar happened to be showing.
  */
-function fillDisplays(sources, activeId) {
-  const select = $('#controlDisplay');
-  const signature = sources.map((source) => source.id).join('|');
-  if (select.dataset.filled !== signature) {
-    select.dataset.filled = signature;
-    select.replaceChildren(...sources.map((source) => {
-      const option = document.createElement('option');
-      option.value = source.id;
-      option.textContent = source.name;
-      return option;
-    }));
-  }
-  // Only when it disagrees: assigning `value` while the dropdown is open
-  // closes it out from under the user.
-  if (activeId && select.value !== activeId) select.value = activeId;
+let lastControlState = {};
+
+/** Frame-rate stops offered by the slider. The protocol accepts 1–240. */
+const FPS_STOPS = [15, 30, 45, 60];
+
+/**
+ * The Stream settings modal: monitor, frame rate, and what the picture is
+ * tuned for. These were three dropdowns crowded into the toolbar, where two of
+ * the three were dead weight against a browser-hosted connector with nothing
+ * on screen to say why.
+ *
+ * Everything applies to the live session the moment it changes — there is no
+ * apply step, and Done only closes the box.
+ *
+ * Only the desktop app can re-capture silently, so a browser-hosted connector
+ * reports no monitors at all. Monitor and frame rate both go through that same
+ * re-capture, so both are gated on it and the box says so. Picture tuning only
+ * touches the encoder on the existing track, so it works either way.
+ */
+function openStreamModal() {
+  const { sources = [], activeSourceId, frameRate, streamMode, connected } = lastControlState;
+  if (!connected) return null;
+  const canRecapture = sources.length > 0;
+
+  return openModal((close) => {
+    /* ── monitor ── */
+    const monitor = el('select', { class: 'select-input' });
+    if (canRecapture) {
+      monitor.replaceChildren(...sources.map((source) => el('option', { value: source.id }, source.name)));
+      // The entry already displayed fires no change event when picked, so the
+      // picker has to open on the monitor actually being captured — otherwise
+      // the one you want is the one you cannot choose. Guarded on the id still
+      // being in this host's list: ids are per-machine, and a stale one would
+      // silently fall back to the host's first screen.
+      if (activeSourceId && sources.some((source) => source.id === activeSourceId)) {
+        monitor.value = activeSourceId;
+      }
+      monitor.addEventListener('change', (event) => state.control.switchDisplay(event.target.value));
+    } else {
+      monitor.replaceChildren(el('option', {}, 'Whatever the PC is sharing'));
+      monitor.disabled = true;
+    }
+
+    /* ── frame rate ── */
+    const startFps = Number(frameRate) || 60;
+    const startIndex = FPS_STOPS.reduce(
+      (best, stop, i) => (Math.abs(stop - startFps) < Math.abs(FPS_STOPS[best] - startFps) ? i : best),
+      0,
+    );
+    const fpsValue = el('span', { class: 'field-value' }, `${FPS_STOPS[startIndex]} fps`);
+    const fps = el('input', {
+      class: 'range-input',
+      type: 'range',
+      min: '0',
+      max: String(FPS_STOPS.length - 1),
+      step: '1',
+      value: String(startIndex),
+    });
+    // The readout follows the thumb, but the change only goes to the PC on
+    // release: every frame-rate change re-captures the screen over there, so
+    // sending one per pixel of travel would thrash the capture pipeline.
+    fps.addEventListener('input', () => {
+      fpsValue.textContent = `${FPS_STOPS[Number(fps.value)]} fps`;
+    });
+    fps.addEventListener('change', () => state.control.setFrameRate(FPS_STOPS[Number(fps.value)]));
+    fps.disabled = !canRecapture;
+
+    /* ── picture tuning ── */
+    const mode = el('select', { class: 'select-input' },
+      el('option', { value: 'text' }, 'Sharp text — best for reading, editors, browsing'),
+      el('option', { value: 'balanced' }, 'Balanced — sharp when it can be, smooth when it can’t'),
+      el('option', { value: 'motion' }, 'Smooth motion — best for video and games'),
+    );
+    if (streamMode) mode.value = streamMode;
+    mode.addEventListener('change', (event) => state.control.setStreamMode(event.target.value));
+
+    return el('div', {},
+      el('h2', { class: 'modal-title' }, 'Stream'),
+      el('p', { class: 'modal-sub' }, 'Applies to this session, straight away.'),
+
+      el('div', { class: 'field' },
+        el('span', { class: 'field-label' }, 'Monitor'),
+        monitor,
+      ),
+      el('div', { class: 'field' },
+        el('div', { class: 'field-head' },
+          el('span', { class: 'field-label' }, 'Frame rate'),
+          fpsValue,
+        ),
+        fps,
+      ),
+      canRecapture ? null : el('p', { class: 'field-note' },
+        'Monitor and frame rate need the desktop app. This PC is sharing from a browser tab, '
+        + 'which cannot change what it captures without raising the screen picker again.'),
+      el('div', { class: 'field' },
+        el('span', { class: 'field-label' }, 'Tuned for'),
+        mode,
+      ),
+
+      el('div', { class: 'modal-footer' },
+        el('button', { class: 'btn btn--primary', onClick: () => close(true) }, 'Done'),
+      ),
+    );
+  }, { width: '420px' });
 }
 
 /**
@@ -601,14 +679,10 @@ async function main() {
       $('#controlPasteBtn').disabled = !connected || !canInput;
       $('#controlKeysBtn').disabled = !connected || !canInput;
       if (!connected || !canInput) toggleKeyPad(false);
-      // Frame rate, stream mode and display are capture settings, not input,
+      // Frame rate, stream mode and monitor are capture settings, not input,
       // so they stay available on a view-only session.
-      $('#controlFps').disabled = !connected;
-      $('#controlMode').disabled = !connected;
-      if (frameRate) $('#controlFps').value = String(frameRate);
-      if (streamMode) $('#controlMode').value = streamMode;
-      if (sources) fillDisplays(sources, activeSourceId);
-      $('#controlDisplay').hidden = !connected || !sources?.length;
+      lastControlState = { connected, sources, activeSourceId, frameRate, streamMode };
+      $('#controlStreamBtn').disabled = !connected;
 
       const dot = $('#latencyDot');
       dot.className = 'latency-dot';
@@ -651,15 +725,7 @@ async function main() {
     const sent = await state.control.sendClipboard();
     toast(sent ? 'Clipboard sent to the PC' : 'Could not read the clipboard', sent ? 'success' : 'danger');
   });
-  $('#controlFps').addEventListener('change', (event) => {
-    state.control.setFrameRate(Number(event.target.value));
-  });
-  $('#controlDisplay').addEventListener('change', (event) => {
-    state.control.switchDisplay(event.target.value);
-  });
-  $('#controlMode').addEventListener('change', (event) => {
-    state.control.setStreamMode(event.target.value);
-  });
+  $('#controlStreamBtn').addEventListener('click', () => openStreamModal());
   buildKeyPad();
   $('#controlKeysBtn').addEventListener('click', () => toggleKeyPad());
   $('#controlFullscreen').addEventListener('click', () => {
