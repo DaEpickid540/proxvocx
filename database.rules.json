@@ -86,12 +86,14 @@
         // subtree — video and input never touch the database. Two modes:
         // 'control' shares the whole desktop; 'scripted' opens one real,
         // scripted browser tab on the PC for a single URL (Browser mode
-        // with JavaScript turned on) and carries that starting URL along.
+        // with JavaScript turned on) and carries that starting URL along;
+        // 'fetch' is a media-less data channel that carries script-free
+        // Browser mode's requests directly instead of through requests/.
         "sessions": {
           "$sessionId": {
             ".write": "auth != null && root.child('machines/' + $machineId + '/owners/' + auth.uid).val() === true",
             "clientUid": { ".validate": "newData.isString()" },
-            "mode":      { ".validate": "newData.val() === 'control' || newData.val() === 'scripted'" },
+            "mode":      { ".validate": "newData.val() === 'control' || newData.val() === 'scripted' || newData.val() === 'fetch'" },
             "url":       { ".validate": "newData.isString() && newData.val().length <= 2048 && newData.val().matches(/^https?:\\/\\//i)" },
             "state":     { ".validate": "newData.isString() && newData.val().length <= 24" },
             "error":     { ".validate": "newData.isString() && newData.val().length <= 256" },

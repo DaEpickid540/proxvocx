@@ -1,8 +1,9 @@
 /**
  * Browser mode: a mini browser whose network stack is the PC.
  *
- * Every byte on screen was fetched by the connector and carried back through
- * Firebase. The rendered document lives in a sandboxed iframe *without*
+ * Every byte on screen was fetched by the connector and carried back — over a
+ * direct WebRTC data channel when one is open (fetch-tunnel.js), otherwise
+ * through the Firebase request queue. The rendered document lives in a sandboxed iframe *without*
  * `allow-scripts`, so nothing from the remote site ever executes here. That
  * costs us dynamic pages, and buys a viewer that cannot be attacked by what
  * it renders.
@@ -14,18 +15,30 @@
 import { proxyRequest, ProxyError, responseText, responseDataUrl, responseKind } from './proxy-client.js';
 import { formatBytes } from './ui.js';
 
-/** Subresources are individually proxied; keep a lid on the round trips. */
-const MAX_SUBRESOURCES = 40;
-const SUBRESOURCE_CONCURRENCY = 6;
-/** Background images and @font-face sources inside one stylesheet blob. */
-const MAX_CSS_URLS = 24;
-const CSS_URL_CONCURRENCY = 4;
+/**
+ * Subresources are individually proxied, so how many a page may pull depends
+ * on the lane they travel. Through the database every one is four round trips
+ * and a write of its whole body, so the lid stays low. Over the direct fast
+ * lane (fetch-tunnel.js) they are one hop each and cost no database quota, so
+ * a page gets its images rather than the first forty of them.
+ */
+const LIMITS = {
+  slow: { subresources: 40, concurrency: 6, cssUrls: 24, cssConcurrency: 4 },
+  fast: { subresources: 250, concurrency: 12, cssUrls: 64, cssConcurrency: 8 },
+};
+
+/**
+ * Images, stylesheets and fonts already fetched this session, so a logo or a
+ * stylesheet shared by every page on a site crosses the link once rather than
+ * once per click. Kept in memory only and bounded by size; cleared on reset.
+ */
+const SUBRESOURCE_CACHE_MAX_CHARS = 48 * 1024 * 1024;
 
 /**
  * `request` is injectable so the rewriting pipeline can be exercised without a
  * live PC on the other end; it defaults to the real Firebase round trip.
  */
-export function createMiniBrowser({ db, getMachineId, elements, onStatus, request }) {
+export function createMiniBrowser({ db, getMachineId, elements, onStatus, request, isFast = () => false }) {
   const { frame, stage, overlay, overlayTitle, overlayMessage, urlInput, urlLock, loadBar,
           backBtn, forwardBtn } = elements;
 
@@ -36,6 +49,44 @@ export function createMiniBrowser({ db, getMachineId, elements, onStatus, reques
   let cursor = -1;
   let inFlight = null;
   let objectUrls = [];
+  const subCache = new Map(); // `${machineId} ${url}` -> response, oldest first
+  const subInFlight = new Map(); // same key -> Promise<response>
+  let subCacheChars = 0;
+
+  const limits = () => (isFast(getMachineId()) ? LIMITS.fast : LIMITS.slow);
+
+  /**
+   * A GET for an image, stylesheet or font — from the cache when it can be,
+   * and shared when the same URL is already on its way (the same background
+   * image referenced by three stylesheets is one request, not three).
+   */
+  function fetchSubresource(machineId, spec, options) {
+    const key = `${machineId} ${spec.url}`;
+    const hit = subCache.get(key);
+    if (hit) {
+      // Re-inserted so the Map's order stays least-recently-used first.
+      subCache.delete(key);
+      subCache.set(key, hit);
+      return Promise.resolve(hit);
+    }
+    if (subInFlight.has(key)) return subInFlight.get(key);
+
+    const promise = fetchPage(machineId, spec, options).then((response) => {
+      const size = String(response.body || '').length;
+      if (response.status === 200 && !response.truncated && size < SUBRESOURCE_CACHE_MAX_CHARS / 4) {
+        subCache.set(key, response);
+        subCacheChars += size;
+        for (const [oldKey, old] of subCache) {
+          if (subCacheChars <= SUBRESOURCE_CACHE_MAX_CHARS) break;
+          subCache.delete(oldKey);
+          subCacheChars -= String(old.body || '').length;
+        }
+      }
+      return response;
+    }).finally(() => subInFlight.delete(key));
+    subInFlight.set(key, promise);
+    return promise;
+  }
 
   /* ── navigation ────────────────────────────────────────────── */
 
@@ -153,6 +204,17 @@ export function createMiniBrowser({ db, getMachineId, elements, onStatus, reques
     for (const node of doc.querySelectorAll('base')) node.remove();
 
     const pending = [];
+    const queued = new Set();
+    const { subresources: maxSubresources } = limits();
+    const fast = limits() === LIMITS.fast;
+    /** Queues a URL once, however many elements point at it. */
+    const want = (kind, url) => {
+      if (queued.has(url)) return true;
+      if (pending.length >= maxSubresources) return false;
+      queued.add(url);
+      pending.push({ kind, url });
+      return true;
+    };
 
     const absolutise = (node, attr) => {
       const raw = node.getAttribute(attr);
@@ -177,25 +239,54 @@ export function createMiniBrowser({ db, getMachineId, elements, onStatus, reques
       form.setAttribute('action', resolve(action || '', baseUrl) || baseUrl);
     }
 
-    for (const img of doc.querySelectorAll('img[src], img[data-src]')) {
-      const src = absolutise(img, 'src') || absolutise(img, 'data-src');
-      img.removeAttribute('srcset');
-      img.removeAttribute('loading');
-      if (src && pending.length < MAX_SUBRESOURCES) {
-        img.dataset.proxySrc = src;
-        img.removeAttribute('src');
-        pending.push({ kind: 'image', url: src });
-      } else {
-        img.removeAttribute('src');
+    // A <picture>'s <source>s are what the browser would really have shown —
+    // often the only sharp or modern-format version of the image. They used
+    // to be left in place untouched, which meant this device fetched them
+    // straight from the real site, around the PC entirely. The best one is
+    // folded into the <img> as its srcset, and the sources go.
+    for (const picture of doc.querySelectorAll('picture')) {
+      const img = picture.querySelector('img');
+      const chosen = Array.from(picture.querySelectorAll('source[srcset], source[data-srcset]')).find((source) => {
+        const media = source.getAttribute('media');
+        const type = source.getAttribute('type');
+        return (!media || safeMatchMedia(media))
+          && (!type || /^image\/(avif|webp|png|jpe?g|gif|svg\+xml)$/i.test(type.trim()));
+      });
+      if (img && chosen) {
+        img.setAttribute('srcset', chosen.getAttribute('srcset') || chosen.getAttribute('data-srcset'));
       }
+      for (const source of picture.querySelectorAll('source')) source.remove();
+    }
+
+    const cssWidth = frame.clientWidth || 1024;
+    for (const img of doc.querySelectorAll('img')) {
+      const srcset = img.getAttribute('srcset') || img.getAttribute('data-srcset');
+      const plain = absolutise(img, 'src') || absolutise(img, 'data-src');
+      // On the fast lane, the srcset candidate that matches this screen —
+      // a Chromebook's 2x display showing the 1x image is exactly the
+      // "everything looks soft" the old srcset-stripping produced. On the
+      // database lane the plain src is kept (smaller, and inside the size
+      // cap), falling back to the smallest candidate when there is no src.
+      const widthHint = Number(img.getAttribute('width')) || cssWidth;
+      const fromSet = srcset ? pickSrcset(srcset, baseUrl, Math.min(widthHint, cssWidth), fast) : null;
+      const src = (fast && fromSet) || plain || fromSet;
+      for (const attr of ['srcset', 'data-srcset', 'sizes', 'loading', 'src', 'data-src']) img.removeAttribute(attr);
+      if (src && want('image', src)) img.dataset.proxySrc = src;
+    }
+
+    // Media and image inputs are not proxied; the CSP below would refuse them
+    // anyway, and removing the address keeps it from ever being attempted.
+    for (const node of doc.querySelectorAll('video, audio, source, track, input[type="image"]')) {
+      node.removeAttribute('src');
+      node.removeAttribute('poster');
+      node.removeAttribute('srcset');
     }
 
     for (const link of doc.querySelectorAll('link[rel~="stylesheet"][href]')) {
       const href = absolutise(link, 'href');
-      if (href && pending.length < MAX_SUBRESOURCES) {
+      if (href && want('style', href)) {
         link.dataset.proxyStyle = href;
         link.removeAttribute('href');
-        pending.push({ kind: 'style', url: href });
       } else {
         link.remove();
       }
@@ -227,6 +318,8 @@ export function createMiniBrowser({ db, getMachineId, elements, onStatus, reques
 
     doc.head?.prepend(viewportMeta(doc));
     doc.head?.prepend(baseStyles(doc));
+    // First in <head>, so it governs everything parsed after it.
+    doc.head?.prepend(lockdownPolicy(doc));
     return { pending, inlineStyles };
   }
 
@@ -241,10 +334,10 @@ export function createMiniBrowser({ db, getMachineId, elements, onStatus, reques
         const item = pending[index];
         index += 1;
         try {
-          const response = await fetchPage(machineId, {
+          const response = await fetchSubresource(machineId, {
             url: item.url,
             method: 'GET',
-            headers: { accept: item.kind === 'style' ? 'text/css,*/*;q=0.1' : 'image/*,*/*;q=0.8' },
+            headers: { accept: item.kind === 'style' ? 'text/css,*/*;q=0.1' : 'image/avif,image/webp,image/*,*/*;q=0.8' },
           }, { timeoutMs: 25_000 });
 
           if (frame.contentDocument !== doc) return; // navigated away
@@ -269,7 +362,7 @@ export function createMiniBrowser({ db, getMachineId, elements, onStatus, reques
     };
 
     await Promise.all(
-      Array.from({ length: Math.min(SUBRESOURCE_CONCURRENCY, pending.length) }, worker),
+      Array.from({ length: Math.min(limits().concurrency, pending.length) }, worker),
     );
   }
 
@@ -305,7 +398,8 @@ export function createMiniBrowser({ db, getMachineId, elements, onStatus, reques
     const seen = new Set();
     let m;
     CSS_URL_RE.lastIndex = 0;
-    while ((m = CSS_URL_RE.exec(withoutImports)) && matches.length < MAX_CSS_URLS) {
+    const { cssUrls: maxCssUrls, cssConcurrency } = limits();
+    while ((m = CSS_URL_RE.exec(withoutImports)) && matches.length < maxCssUrls) {
       const raw = m[2].trim();
       if (!raw || seen.has(raw)) continue;
       const resolved = resolve(raw, baseUrl);
@@ -322,7 +416,7 @@ export function createMiniBrowser({ db, getMachineId, elements, onStatus, reques
         const item = matches[index];
         index += 1;
         try {
-          const response = await fetchPage(machineId, {
+          const response = await fetchSubresource(machineId, {
             url: item.resolved,
             method: 'GET',
             headers: { accept: '*/*' },
@@ -333,7 +427,7 @@ export function createMiniBrowser({ db, getMachineId, elements, onStatus, reques
         }
       }
     };
-    await Promise.all(Array.from({ length: Math.min(CSS_URL_CONCURRENCY, matches.length) }, worker));
+    await Promise.all(Array.from({ length: Math.min(cssConcurrency, matches.length) }, worker));
 
     return withoutImports.replace(CSS_URL_RE, (full, quote, raw) => {
       const value = results.get(raw.trim());
@@ -502,6 +596,8 @@ export function createMiniBrowser({ db, getMachineId, elements, onStatus, reques
     reset() {
       inFlight?.abort();
       releaseObjectUrls();
+      subCache.clear();
+      subCacheChars = 0;
       history.length = 0;
       cursor = -1;
       frame.srcdoc = '';
@@ -564,6 +660,85 @@ const CSS_URL_RE = /url\(\s*(['"]?)(?!data:)([^'")]+)\1\s*\)/gi;
 function blankCssUrls(css) {
   if (!css) return '';
   return css.replace(/@import[^;]+;/gi, '').replace(CSS_URL_RE, 'url("")');
+}
+
+/**
+ * Nothing in the rendered page may fetch anything by itself. Every image,
+ * stylesheet and font it shows was fetched through the PC and inlined as a
+ * data: URL; anything that slipped past the rewriter (a media element, an
+ * inline style attribute's url(), a form posting straight to the real site)
+ * would otherwise go out from *this* device, around the PC and with this
+ * device's address on it. Forms are intercepted and replayed through the
+ * proxy, so blocking their native submission loses nothing.
+ */
+function lockdownPolicy(doc) {
+  const meta = doc.createElement('meta');
+  meta.setAttribute('http-equiv', 'Content-Security-Policy');
+  meta.setAttribute('content', [
+    "default-src 'none'",
+    'img-src data: blob:',
+    "style-src 'unsafe-inline'",
+    'font-src data:',
+    'media-src data: blob:',
+    "form-action 'none'",
+  ].join('; '));
+  return meta;
+}
+
+/**
+ * The srcset candidate to fetch. `targetCssWidth` is roughly how wide the
+ * image will be drawn; with `best` it returns the smallest candidate that is
+ * still sharp at this screen's pixel density, otherwise the smallest outright.
+ */
+function pickSrcset(srcset, baseUrl, targetCssWidth, best) {
+  const candidates = [];
+  for (const { url: rawUrl, descriptor } of parseSrcset(srcset)) {
+    const url = resolve(rawUrl, baseUrl);
+    if (!url) continue;
+    const match = /^(\d+(?:\.\d+)?)([wx])$/i.exec(descriptor || '1x');
+    if (!match) continue;
+    candidates.push({ url, value: Number(match[1]), unit: match[2].toLowerCase() });
+  }
+  if (!candidates.length) return null;
+  // Mixed units are malformed; judge by whichever the first candidate uses.
+  const unit = candidates[0].unit;
+  const same = candidates.filter((c) => c.unit === unit).sort((a, b) => a.value - b.value);
+  if (!best) return same[0].url;
+  const dpr = globalThis.devicePixelRatio || 1;
+  const target = unit === 'x' ? dpr : targetCssWidth * dpr;
+  return (same.find((c) => c.value >= target) || same[same.length - 1]).url;
+}
+
+/**
+ * Splits a srcset the way the HTML spec does, rather than on every comma: a
+ * URL may itself contain commas (image CDNs put them in the path), and only a
+ * comma after whitespace or after the descriptor separates candidates.
+ */
+function parseSrcset(srcset) {
+  const out = [];
+  let i = 0;
+  while (i < srcset.length) {
+    while (i < srcset.length && /[\s,]/.test(srcset[i])) i += 1;
+    if (i >= srcset.length) break;
+    const start = i;
+    while (i < srcset.length && !/\s/.test(srcset[i])) i += 1;
+    let url = srcset.slice(start, i);
+    let descriptor = '';
+    if (url.endsWith(',')) {
+      url = url.replace(/,+$/, '');
+    } else {
+      const descStart = i;
+      while (i < srcset.length && srcset[i] !== ',') i += 1;
+      descriptor = srcset.slice(descStart, i).trim();
+      i += 1;
+    }
+    if (url) out.push({ url, descriptor });
+  }
+  return out;
+}
+
+function safeMatchMedia(query) {
+  try { return globalThis.matchMedia?.(query).matches ?? true; } catch { return false; }
 }
 
 function viewportMeta(doc) {

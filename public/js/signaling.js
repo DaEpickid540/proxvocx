@@ -122,14 +122,17 @@ function releaseOnPagehide() {
 }
 
 /** Armed only while at least one session is live — a page holding nothing
- *  open has no business interrupting a navigation. */
+ *  open has no business interrupting a navigation. The "Leave site?" prompt
+ *  is further limited to sessions that asked for it: Browser mode's fetch
+ *  channel is open the whole time you browse, and closing the tab on it
+ *  loses nothing worth a dialog. */
 function syncUnloadGuards() {
-  const method = openSessions.size ? 'addEventListener' : 'removeEventListener';
-  window[method]('beforeunload', warnBeforeUnload);
-  window[method]('pagehide', releaseOnPagehide);
+  const warn = Array.from(openSessions.values()).some((entry) => entry.warnOnLeave);
+  window[warn ? 'addEventListener' : 'removeEventListener']('beforeunload', warnBeforeUnload);
+  window[openSessions.size ? 'addEventListener' : 'removeEventListener']('pagehide', releaseOnPagehide);
 }
 
-export async function createSession(db, machineId, clientUid, mode = 'control', extra = {}) {
+export async function createSession(db, machineId, clientUid, mode = 'control', extra = {}, { warnOnLeave = true } = {}) {
   const node = push(ref(db, paths.sessions(machineId)));
   await set(node, {
     clientUid,
@@ -144,7 +147,7 @@ export async function createSession(db, machineId, clientUid, mode = 'control', 
   await onDisconnect(node).remove().catch(() => {});
 
   const path = paths.session(machineId, node.key);
-  openSessions.set(path, { db, path });
+  openSessions.set(path, { db, path, warnOnLeave });
   syncUnloadGuards();
 
   return node.key;

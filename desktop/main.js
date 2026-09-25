@@ -31,14 +31,30 @@ import {
 const here = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = packagedPublicDir();
 
+/**
+ * The user agent proxied requests go out with: an ordinary desktop Chrome,
+ * matching the Chromium this app actually ships. The old self-describing
+ * "compatible; proxvocx" string read as a bot, and plenty of sites answer a
+ * bot with a stripped-down page, a challenge, or nothing at all — a large
+ * part of why pages looked worse here than through other proxies.
+ */
+function browserUserAgent() {
+  const major = String(process.versions.chrome || '126').split('.')[0];
+  const platform = process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7'
+    : process.platform === 'linux' ? 'X11; Linux x86_64'
+      : 'Windows NT 10.0; Win64; x64';
+  return `Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`;
+}
+
 const FETCH_CONFIG = {
   requestTimeoutMs: Number(process.env.PROXVOCX_TIMEOUT_MS) || 20_000,
   maxResponseBytes: Number(process.env.PROXVOCX_MAX_BYTES) || 512 * 1024,
   maxRedirects: 5,
   allowPrivateNetwork: process.env.PROXVOCX_ALLOW_PRIVATE === 'true',
-  userAgent: process.env.PROXVOCX_USER_AGENT
-    || 'Mozilla/5.0 (compatible; proxvocx/1.0; +https://github.com/proxvocx)',
+  userAgent: process.env.PROXVOCX_USER_AGENT || browserUserAgent(),
 };
+/** Hard ceiling for the direct fast lane's per-response size (see pc-fetch.js). */
+const FAST_LANE_MAX_BYTES = 16 * 1024 * 1024;
 
 /**
  * Nothing launches this app from a terminal — it is started by the installer,
@@ -306,8 +322,15 @@ function registerIpc() {
   });
 
   ipcMain.handle('proxvocx:fetch', async (_event, request) => {
+    // The database lane keeps the configured cap — its responses are written
+    // into Firebase whole. The direct fast lane (pc-fetch.js) asks for more,
+    // up to a hard ceiling, since its bytes never touch the database.
+    const asked = Number(request?.maxBytes);
+    const config = Number.isFinite(asked) && asked > FETCH_CONFIG.maxResponseBytes
+      ? { ...FETCH_CONFIG, maxResponseBytes: Math.min(asked, FAST_LANE_MAX_BYTES) }
+      : FETCH_CONFIG;
     try {
-      return await fetchThroughProxy(request, FETCH_CONFIG, log);
+      return await fetchThroughProxy(request, config, log);
     } catch (err) {
       // Re-thrown across IPC as a plain message, so tag the code onto it for
       // the page to classify.

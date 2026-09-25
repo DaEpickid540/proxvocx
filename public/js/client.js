@@ -22,6 +22,7 @@ import {
 import { paths, isPresenceFresh, formatPairingCode } from './paths.js';
 import { claimPairingCode, unpairMachine, PairingError } from './pairing.js';
 import { createMiniBrowser, normaliseUrl } from './client-browser.js';
+import { createBrowserTransport } from './fetch-tunnel.js';
 import { createControlViewer, SMOOTHING } from './client-control.js';
 import {
   REMAP_TARGETS, REMAP_PRESETS, loadRemap, saveRemap, describeCode, targetLabel,
@@ -47,6 +48,7 @@ const state = {
   selected: null,
   mode: 'browser',
   browser: null,
+  browserTransport: null,
   scriptedBrowser: null,
   control: null,
   presenceWatchers: new Map(),
@@ -74,6 +76,15 @@ function activeBrowser() {
 function syncBrowserEngine() {
   const entry = state.selected ? state.machines.get(state.selected) : null;
   const scriptsOn = !!(fresh(entry?.presence) && entry.presence.capabilities?.scripts);
+
+  // The script-free engine's fast lane is opened as soon as it is the one on
+  // screen, so the first page is fast too rather than only the second. The
+  // scripted engine carries its own connection and has no use for it.
+  if (state.mode === 'browser' && !scriptsOn && fresh(entry?.presence)) {
+    state.browserTransport?.warm(state.selected);
+  } else if (scriptsOn) {
+    state.browserTransport?.close();
+  }
 
   if (scriptsOn === state.scriptsActive) return;
 
@@ -785,9 +796,12 @@ async function main() {
   $('#accountBtn').textContent = (user.email || user.displayName || '?').slice(0, 1);
 
   /* mini browser */
+  state.browserTransport = createBrowserTransport({ db: state.db, uid: state.uid });
   state.browser = createMiniBrowser({
     db: state.db,
     getMachineId: () => state.selected,
+    request: (machineId, spec, options) => state.browserTransport.request(machineId, spec, options),
+    isFast: (machineId) => state.browserTransport.isFast(machineId),
     elements: {
       frame: $('#browserFrame'),
       stage: $('#browserStage'),

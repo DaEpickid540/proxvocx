@@ -34,7 +34,7 @@ function normalizeMethod(method) {
 }
 
 function normalizeHeaders(headers, userAgent) {
-  const out = { accept: '*/*', 'accept-encoding': 'gzip, deflate', 'user-agent': userAgent };
+  const out = { accept: '*/*', 'accept-encoding': 'gzip, deflate, br', 'user-agent': userAgent };
   if (headers && typeof headers === 'object' && !Array.isArray(headers)) {
     const entries = Object.entries(headers).slice(0, 32);
     for (const [rawKey, rawValue] of entries) {

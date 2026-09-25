@@ -30,6 +30,7 @@ import { hostBridge } from './host-bridge.js';
 import { startProxyServer } from './pc-proxy.js';
 import { startControlHost } from './pc-control.js';
 import { startScriptedBrowserHost } from './pc-scripted-browser.js';
+import { startFetchHost } from './pc-fetch.js';
 import { $, el, openModal, toast, confirmModal, formatBytes } from './ui.js';
 
 const DEFAULT_SETTINGS = {
@@ -54,8 +55,14 @@ const DEFAULT_SETTINGS = {
   // matching the shape the viewer's stage expects.
   scriptedWidth: 1600,
   scriptedHeight: 1000,
-  scriptedFrameRate: 30,
+  // 60, not 30: scrolling is most of what anyone does in a browser, and at 30
+  // it reads as judder. Paints only happen when the page changes, so a still
+  // page costs nothing extra.
+  scriptedFrameRate: 60,
   scriptedQuality: 92,
+  // Bumped when a default changes enough that stores saved under the old one
+  // should be moved onto it once (see boot()).
+  settingsRev: 2,
   screenSourceId: null,
   autoLaunch: false,
 };
@@ -341,6 +348,17 @@ function enterPairedMode() {
       getSettings: () => state.settings,
     });
     log('serving proxy requests', 'good');
+  }
+
+  if (!state.fetchHost) {
+    state.fetchHost = startFetchHost({
+      db: state.db,
+      machineId: state.machineId,
+      bridge: hostBridge,
+      log,
+      onStat: bumpStat,
+      getSettings: () => state.settings,
+    });
   }
 
   if (!state.control) {
@@ -878,6 +896,13 @@ async function main() {
   // same release, so its absence is what dates the store.
   if (store.settings && !store.settings.streamMode) {
     state.settings.frameRate = DEFAULT_SETTINGS.frameRate;
+  }
+  // Every store before rev 2 holds the old 30 fps scripted default, because
+  // settings are saved whole. Move those onto 60 once; anything else was a
+  // real choice and is left alone, and so is a 30 chosen after this.
+  if (store.settings && !(store.settings.settingsRev >= 2)) {
+    if (state.settings.scriptedFrameRate === 30) state.settings.scriptedFrameRate = DEFAULT_SETTINGS.scriptedFrameRate;
+    state.settings.settingsRev = DEFAULT_SETTINGS.settingsRev;
   }
   if (hostBridge.isDesktop) {
     state.settings.autoLaunch = await hostBridge.getAutoLaunch();

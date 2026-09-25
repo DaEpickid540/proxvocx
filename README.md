@@ -79,6 +79,8 @@ off a screen and typed on a phone cannot be misread.
 | `public/js/pc-control.js` | Connector: serves screen + replays input |
 | `public/js/pc-scripted-browser.js` | Connector: serves a real, JS-enabled browser tab |
 | `public/js/proxy-client.js` | Client: enqueue a request, await the response |
+| `public/js/fetch-tunnel.js` | Client: Browser mode's direct fast lane, with fallback to the queue |
+| `public/js/pc-fetch.js` | Connector: serves the fast lane over a WebRTC data channel |
 | `public/js/client-browser.js` | The script-free mini browser and its HTML rewriter |
 | `public/js/client-control.js` | The remote desktop viewer |
 | `public/js/client-scripted-browser.js` | The viewer for a real, scripted browser tab |
@@ -103,20 +105,30 @@ machines/{machineId}
                                                added (never replaced) by the PC at pairing
   meta        { name, platform, appVersion, createdAt }
   presence    { online, lastSeen, capabilities: { proxy, control, input, scripts } }
-  requests/{id}    owner writes, PC drains        ← Browser mode (script-free)
-  responses/{id}   PC writes, owner reads+deletes ← Browser mode (script-free)
+  requests/{id}    owner writes, PC drains        ← Browser mode (script-free),
+  responses/{id}   PC writes, owner reads+deletes ←   only until the fast lane opens
   sessions/{id}    { mode, url?, offer, answer, ice } ← handshake only, for
-                                                        both PC Control and
+                                                        PC Control ('control'),
                                                         scripted Browser mode
+                                                        ('scripted') and the
+                                                        Browser-mode fast lane
+                                                        ('fetch')
 
 users/{uid}/machines/{machineId}   { name, pairedAt }
 
 pairing/{code}   { machineId, machineName, deviceUid, createdAt, expiresAt, claimedBy }
 ```
 
-Only the WebRTC *handshake* touches the database. Screen frames and input
-events travel peer-to-peer, so a control session costs a few kilobytes of
-Firebase quota regardless of how long you stay connected.
+Only the WebRTC *handshake* touches the database. Screen frames, input
+events and — once its fast lane is open — script-free Browser mode's pages
+all travel peer-to-peer, so a session costs a few kilobytes of Firebase quota
+regardless of how long you stay connected. The `requests`/`responses` queue
+is the fallback for the first moments of browsing and for networks where a
+direct connection cannot be made.
+
+> **Deploy the rules again** after updating (`firebase deploy --only database`):
+> the fast lane uses a new session mode, `'fetch'`, which older rules reject.
+> Browsing still works without it, just only over the slower database queue.
 
 `pairing` itself is not readable — only `pairing/{code}` is, so codes cannot be
 listed or enumerated. Knowing the code is the secret.
@@ -197,9 +209,9 @@ Environment variables read by the desktop app:
 | --- | --- | --- |
 | `PROXVOCX_SITE_URL` | *(packaged copy)* | Load the connector page from a deployed site |
 | `PROXVOCX_TIMEOUT_MS` | `20000` | Per-request fetch timeout |
-| `PROXVOCX_MAX_BYTES` | `524288` | Response body cap; larger bodies are truncated |
+| `PROXVOCX_MAX_BYTES` | `524288` | Response body cap on the database queue; larger bodies are truncated (the direct fast lane allows up to 8 MB) |
 | `PROXVOCX_ALLOW_PRIVATE` | `false` | Allow LAN/loopback targets (SSRF guard off) |
-| `PROXVOCX_USER_AGENT` | a browser-ish UA | UA sent to proxied sites |
+| `PROXVOCX_USER_AGENT` | desktop Chrome, matching the bundled Chromium | UA sent to proxied sites |
 
 ## 5. Use it
 
@@ -238,7 +250,13 @@ trade:
 
 - ✅ Static pages, articles, docs, search results, forms (GET and POST)
 - ✅ Links, back/forward, images, stylesheets, background images and web fonts
-  (all individually proxied — nothing is fetched by your device directly)
+  (all individually proxied — nothing is fetched by your device directly, and
+  a Content-Security-Policy on the rendered page enforces that)
+- ✅ Sharp images on high-DPI screens: `srcset` and `<picture>` are honoured,
+  picking the candidate that suits this screen
+- ✅ Fast: requests travel a direct WebRTC data channel to the PC (falling back
+  to the database queue while it connects), and images/stylesheets are cached
+  for the session
 - ❌ Anything that needs JavaScript — SPAs, infinite scroll, most logins
 - ❌ Video, WebSockets, service workers
 
