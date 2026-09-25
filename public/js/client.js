@@ -22,7 +22,10 @@ import {
 import { paths, isPresenceFresh, formatPairingCode } from './paths.js';
 import { claimPairingCode, unpairMachine, PairingError } from './pairing.js';
 import { createMiniBrowser, normaliseUrl } from './client-browser.js';
-import { createControlViewer } from './client-control.js';
+import { createControlViewer, SMOOTHING } from './client-control.js';
+import {
+  REMAP_TARGETS, REMAP_PRESETS, loadRemap, saveRemap, describeCode, targetLabel,
+} from './key-remap.js';
 import { createScriptedBrowserViewer } from './client-scripted-browser.js';
 import { $, el, openModal, toast, confirmModal, formatBytes, formatRelative, setBusy } from './ui.js';
 
@@ -379,6 +382,26 @@ let lastControlState = {};
 const FPS_STOPS = [15, 30, 60, 90, 120, 144];
 
 /**
+ * Heights the viewer can ask the PC to send at. The PC never upscales, so a
+ * choice above what it captures simply sends what it captures.
+ */
+const RESOLUTIONS = [
+  [0, 'Full — whatever the PC captures'],
+  [1080, '1080p'],
+  [900, '900p'],
+  [720, '720p — easier on a Chromebook or a weak link'],
+  [540, '540p'],
+];
+
+/** What each `limit` reason means, and what to try, for the status bar. */
+const LIMITS = {
+  bandwidth: ['limited by network', 'The link cannot carry this picture. Try Smoothing, a lower resolution or 30 fps, or a wired connection on the PC.'],
+  cpu: ['limited by PC CPU', 'The PC cannot encode fast enough. Try a lower resolution or frame rate, or set the PC\'s codec to "Prefer smoothness (H.264)".'],
+  decode: ['limited by this device', 'This device is dropping frames it received — it cannot decode or draw them in time. Try 720p or a lower frame rate.'],
+  other: ['limited', 'The PC is sending less than it was asked for.'],
+};
+
+/**
  * The Stream settings modal: monitor, frame rate, and what the picture is
  * tuned for. These were three dropdowns crowded into the toolbar, where two of
  * the three were dead weight against a browser-hosted connector with nothing
@@ -393,7 +416,9 @@ const FPS_STOPS = [15, 30, 60, 90, 120, 144];
  * touches the encoder on the existing track, so it works either way.
  */
 function openStreamModal() {
-  const { sources = [], activeSourceId, frameRate, streamMode, connected } = lastControlState;
+  const {
+    sources = [], activeSourceId, frameRate, streamMode, connected, resolution, smoothing,
+  } = lastControlState;
   if (!connected) return null;
   const canRecapture = sources.length > 0;
 
@@ -449,6 +474,18 @@ function openStreamModal() {
     if (streamMode) mode.value = streamMode;
     mode.addEventListener('change', (event) => state.control.setStreamMode(event.target.value));
 
+    /* ── resolution ── */
+    const res = el('select', { class: 'select-input' },
+      ...RESOLUTIONS.map(([value, label]) => el('option', { value: String(value) }, label)));
+    res.value = String(resolution || 0);
+    res.addEventListener('change', (event) => state.control.setResolution(Number(event.target.value)));
+
+    /* ── smoothing ── */
+    const smooth = el('select', { class: 'select-input' },
+      ...Object.entries(SMOOTHING).map(([value, { label }]) => el('option', { value }, label)));
+    if (smoothing) smooth.value = smoothing;
+    smooth.addEventListener('change', (event) => state.control.setSmoothing(event.target.value));
+
     return el('div', {},
       el('h2', { class: 'modal-title' }, 'Stream'),
       el('p', { class: 'modal-sub' }, 'Applies to this session, straight away.'),
@@ -471,12 +508,145 @@ function openStreamModal() {
         el('span', { class: 'field-label' }, 'Tuned for'),
         mode,
       ),
+      el('div', { class: 'field' },
+        el('span', { class: 'field-label' }, 'Resolution'),
+        res,
+      ),
+      el('div', { class: 'field' },
+        el('span', { class: 'field-label' }, 'Smoothing'),
+        smooth,
+      ),
+      el('p', { class: 'field-note' },
+        'Choppy but not blurry is usually network jitter — turn Smoothing up. '
+        + 'The status bar says when the PC, the network or this device is the bottleneck.'),
 
       el('div', { class: 'modal-footer' },
         el('button', { class: 'btn btn--primary', onClick: () => close(true) }, 'Done'),
       ),
     );
   }, { width: '420px' });
+}
+
+/**
+ * The key remap editor. Rules live in this browser (see key-remap.js) and
+ * apply to the live session the moment they are saved.
+ */
+function openRemapModal() {
+  let map = loadRemap();
+  let stopListening = null;
+
+  return openModal((close) => {
+    const list = el('div', { class: 'remap-list' });
+    const commit = () => {
+      saveRemap(map);
+      state.control?.reloadKeyRemap();
+      renderList();
+    };
+
+    function renderList() {
+      const rules = Object.entries(map);
+      if (!rules.length) {
+        list.replaceChildren(el('p', { class: 'hint' }, 'No keys are remapped.'));
+        return;
+      }
+      list.replaceChildren(...rules.map(([from, to]) =>
+        el('div', { class: 'remap-row' },
+          el('span', { class: 'remap-key' }, describeCode(from)),
+          el('span', { class: 'remap-arrow' }, '→'),
+          el('span', { class: 'remap-key' }, targetLabel(to)),
+          el('button', {
+            class: 'btn btn--ghost btn--sm',
+            onClick: () => {
+              delete map[from];
+              commit();
+            },
+          }, 'Remove'),
+        )));
+    }
+
+    /* ── new rule ── */
+    let fromCode = null;
+    const fromBtn = el('button', { class: 'btn btn--ghost btn--sm remap-capture' }, 'Press to pick a key');
+    fromBtn.addEventListener('click', () => {
+      if (stopListening) return;
+      fromBtn.textContent = 'Press the key to remap…';
+      fromBtn.classList.add('active');
+      const onKey = (event) => {
+        // Capture phase on the window, and stopped here, so neither the
+        // modal (which closes on Escape) nor the page sees the key.
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        stopListening();
+        if (event.key === 'Escape' || !event.code) {
+          fromBtn.textContent = fromCode ? describeCode(fromCode) : 'Press to pick a key';
+          return;
+        }
+        fromCode = event.code;
+        fromBtn.textContent = describeCode(fromCode);
+      };
+      window.addEventListener('keydown', onKey, true);
+      stopListening = () => {
+        window.removeEventListener('keydown', onKey, true);
+        fromBtn.classList.remove('active');
+        stopListening = null;
+      };
+    });
+
+    const toSelect = el('select', { class: 'select-input' },
+      ...REMAP_TARGETS.map(([group, keys]) => el('optgroup', { label: group },
+        ...keys.map(([code, , label]) => el('option', { value: code }, label)))));
+
+    const addBtn = el('button', {
+      class: 'btn btn--primary btn--sm',
+      onClick: () => {
+        if (!fromCode) {
+          toast('Pick the key to remap first', 'danger');
+          return;
+        }
+        map[fromCode] = toSelect.value;
+        fromCode = null;
+        fromBtn.textContent = 'Press to pick a key';
+        commit();
+      },
+    }, 'Add');
+
+    renderList();
+
+    return el('div', {},
+      el('h2', { class: 'modal-title' }, 'Remap keys'),
+      el('p', { class: 'modal-sub' },
+        'Turn a key on this keyboard into a different key on the PC. Saved on this device only.'),
+
+      el('div', { class: 'section-label' }, 'Quick add'),
+      el('div', { class: 'remap-presets' },
+        ...REMAP_PRESETS.map((preset) => el('button', {
+          class: 'btn btn--ghost btn--sm',
+          onClick: () => {
+            map[preset.from] = preset.to;
+            commit();
+          },
+        }, preset.label))),
+
+      el('div', { class: 'section-label', style: { marginTop: '16px' } }, 'Rules'),
+      list,
+
+      el('div', { class: 'section-label', style: { marginTop: '16px' } }, 'New rule'),
+      el('div', { class: 'remap-new' }, fromBtn, el('span', { class: 'remap-arrow' }, '→'), toSelect, addBtn),
+
+      el('p', { class: 'field-note' },
+        'On a Chromebook, ChromeOS grabs the Search key for its launcher before a web page sees it. '
+        + 'Use Fullscreen while controlling the PC: the page can then ask the browser to hand it '
+        + 'those system keys. In a normal window the launcher may still open. '
+        + 'Esc always releases the keyboard, so it cannot be remapped.'),
+
+      el('div', { class: 'modal-footer' },
+        el('button', { class: 'btn btn--primary', onClick: () => close(true) }, 'Done'),
+      ),
+    );
+  }, { width: '480px' }).finally(() => {
+    // The modal can close while a key capture is still armed.
+    stopListening?.();
+  });
 }
 
 /**
@@ -682,6 +852,7 @@ async function main() {
     onState: ({
       connected, status, rtt, fps, canInput,
       sources, activeSourceId, frameRate, streamMode, mouseLocked,
+      resolution, smoothing, limit,
     }) => {
       $('#controlDisconnect').disabled = !connected;
       $('#controlCtrlAltDel').disabled = !connected || !canInput;
@@ -705,7 +876,9 @@ async function main() {
       }
       // Frame rate, stream mode and monitor are capture settings, not input,
       // so they stay available on a view-only session.
-      lastControlState = { connected, sources, activeSourceId, frameRate, streamMode };
+      lastControlState = {
+        connected, sources, activeSourceId, frameRate, streamMode, resolution, smoothing,
+      };
       const streamBtn = $('#controlStreamBtn');
       if (streamBtn) streamBtn.disabled = !connected;
 
@@ -715,12 +888,21 @@ async function main() {
         $('#latencyText').textContent = status === 'connecting' ? 'connecting…' : 'not connected';
         return;
       }
-      dot.classList.add(rtt == null ? '' : rtt < 60 ? 'good' : rtt < 150 ? 'fair' : 'poor');
       const bits = [];
+      // `classList.add('')` throws, so an unknown RTT must add nothing at all
+      // rather than an empty class — the throw used to abort this whole update.
+      let health = rtt == null ? null : rtt < 60 ? 'good' : rtt < 150 ? 'fair' : 'poor';
       if (rtt != null) bits.push(`${rtt} ms`);
       if (fps) bits.push(`${fps} fps`);
       if (!canInput) bits.push('view-only');
+      const [limitLabel, limitHint] = LIMITS[limit] || [];
+      if (limitLabel) {
+        bits.push(limitLabel);
+        if (health !== 'poor') health = 'fair';
+      }
+      if (health) dot.classList.add(health);
       $('#latencyText').textContent = bits.join(' · ') || 'connected';
+      $('#controlStats').title = limitHint || '';
     },
   });
 
@@ -763,6 +945,7 @@ async function main() {
   });
   buildKeyPad();
   $('#controlKeysBtn').addEventListener('click', () => toggleKeyPad());
+  $('#controlRemapBtn')?.addEventListener('click', () => openRemapModal());
   $('#controlFullscreen').addEventListener('click', () => {
     const stage = $('#controlStage');
     if (document.fullscreenElement) document.exitFullscreen();

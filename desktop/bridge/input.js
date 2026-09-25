@@ -9,12 +9,17 @@
  */
 
 let backend = null;
-let probed = false;
+let probing = null;
 let reason = 'not probed yet';
 
-async function loadBackend() {
-  if (probed) return backend;
-  probed = true;
+/** One probe, shared: callers that arrive while it is in flight wait for it
+ *  rather than reading a backend that has not been assigned yet. */
+function loadBackend() {
+  probing ??= probeBackend();
+  return probing;
+}
+
+async function probeBackend() {
   try {
     const nut = await import('@nut-tree-fork/nut-js');
     // Zero delays: the viewer already paces events, and nut's defaults add
@@ -111,6 +116,12 @@ export async function injectInput(event, bounds) {
   // caching the position (below) — the cache only removes the read half of
   // the race, not the write-ordering half.
   if (event.t === 'p' || event.t === 'pr' || event.t === 'w') {
+    const coalesced = coalesceMove(nut, event, bounds);
+    if (coalesced) return coalesced;
+    // Anything else that touches the pointer closes the open move slot: a
+    // move that arrives after this press must be applied after it, not
+    // folded into a move queued before it.
+    moveSlot = null;
     return enqueue(() => {
       if (event.t === 'pr') return pointerRelEvent(nut, event);
       if (event.t === 'w') return wheelEvent(nut, event, bounds);
@@ -171,6 +182,47 @@ function enqueue(task) {
   // the caller of enqueue() still sees its own rejection via `run`.
   mouseQueue = run.catch(() => {});
   return run;
+}
+
+/**
+ * The move task that is queued but has not started yet, if there is one.
+ *
+ * The queue above keeps moves in order, but on its own it also keeps every
+ * one of them: if the native calls fall behind the rate moves arrive at — a
+ * busy PC, a burst after a network hiccup — the backlog grows and the cursor
+ * trails further and further behind the hand, replaying positions that are
+ * long out of date. Only the latest absolute position matters, and relative
+ * motion can be summed, so a move that arrives while another is still waiting
+ * is merged into it instead of queued behind it. The result is a queue that
+ * can never be more than one move deep, however far behind it gets.
+ */
+let moveSlot = null;
+
+function coalesceMove(nut, event, bounds) {
+  const isAbsMove = event.t === 'p' && event.a === 'move' && !event.rel;
+  const isRelMove = event.t === 'pr';
+  if (!isAbsMove && !isRelMove) return null;
+
+  if (moveSlot && moveSlot.event.t === event.t) {
+    if (isRelMove) {
+      moveSlot.event = { ...moveSlot.event, dx: moveSlot.event.dx + event.dx, dy: moveSlot.event.dy + event.dy };
+    } else {
+      moveSlot.event = event;
+      moveSlot.bounds = bounds;
+    }
+    return moveSlot.run;
+  }
+
+  const slot = { event, bounds };
+  moveSlot = slot;
+  slot.run = enqueue(() => {
+    // Started — from here on a new move needs a task of its own.
+    if (moveSlot === slot) moveSlot = null;
+    return slot.event.t === 'pr'
+      ? pointerRelEvent(nut, slot.event)
+      : pointerEvent(nut, slot.event, slot.bounds);
+  });
+  return slot.run;
 }
 
 /**

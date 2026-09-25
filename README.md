@@ -84,6 +84,7 @@ off a screen and typed on a phone cannot be misread.
 | `public/js/client-scripted-browser.js` | The viewer for a real, scripted browser tab |
 | `public/js/signaling.js` | WebRTC handshake over RTDB |
 | `public/js/input-protocol.js` | The input (and nav command) wire format |
+| `public/js/key-remap.js` | Viewer-side key remapping rules (per device) |
 | `desktop/main.js` | Electron main: IPC, tray, run-at-login |
 | `desktop/preload.cjs` | The only Electron surface the page can see |
 | `desktop/bridge/fetcher.js` | The proxy fetch, with redirect re-validation |
@@ -210,6 +211,17 @@ see a code on this account.
   sandboxed iframe (or a live, real browser tab — see below).
 - **PC Control mode** — hit Connect. Click into the picture to send input,
   press <kbd>Esc</kbd> to give the keyboard back.
+
+  - **Stream** (toolbar) — monitor, frame rate, what the encoder is tuned for,
+    the resolution sent, and **Smoothing**. A picture that is choppy but sharp
+    is usually network jitter: Smoothing holds frames 40–100 ms so they play
+    out evenly, at the cost of that much extra delay. The status bar says
+    when the PC's CPU, the network or the viewing device is the bottleneck;
+    hover it for what to try.
+  - **Remap keys** (toolbar) — turn a key on this keyboard into a different
+    key on the PC, e.g. a Chromebook's Search key into Shift. Rules are saved
+    per device. ChromeOS keeps Search for its launcher, so use **Fullscreen**:
+    the page then asks the browser (Keyboard Lock) to hand it system keys.
 
 The picker returns by itself whenever the selected PC drops offline.
 

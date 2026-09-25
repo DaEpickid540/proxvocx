@@ -102,12 +102,24 @@ export function bitrateFor({ width, height, frameRate }) {
 }
 
 /**
+ * The encoder downscale that turns a captured height into the one the viewer
+ * asked for. Never upscales: a request above what is being captured, or 0,
+ * means "send what you have".
+ */
+export function downscaleFor(capturedHeight, targetHeight) {
+  const captured = Number(capturedHeight) || 0;
+  const target = Number(targetHeight) || 0;
+  if (!captured || !target || target >= captured) return 1;
+  return Math.round((captured / target) * 1000) / 1000;
+}
+
+/**
  * Applies the content hint, the degradation preference and the bitrate ceiling
  * to a live video sender. Safe to call again at any point — `recapture()` does
  * exactly that, because `replaceTrack()` carries the sender's parameters over
  * but not the hint, which belongs to the track that was just swapped out.
  */
-export async function tuneSender(sender, { mode = 'text', frameRate = 30, maxBitrate } = {}) {
+export async function tuneSender(sender, { mode = 'text', frameRate = 30, maxBitrate, scaleDownBy = 1 } = {}) {
   if (!sender) return;
   const profile = STREAM_MODES[mode] || STREAM_MODES.text;
 
@@ -122,8 +134,9 @@ export async function tuneSender(sender, { mode = 'text', frameRate = 30, maxBit
     encoding.maxFramerate = frameRate;
     // A *base* downscale applied before the encoder sees the frame — not a
     // limit on congestion adaptation, which is `degradationPreference`'s job
-    // and happens on top of this. 1 means "start from the real resolution".
-    encoding.scaleResolutionDownBy = 1;
+    // and happens on top of this. 1 means "start from the real resolution";
+    // anything more is the viewer asking for a smaller picture on purpose.
+    encoding.scaleResolutionDownBy = scaleDownBy;
     encoding.networkPriority = 'high';
     encoding.priority = 'high';
   }

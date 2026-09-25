@@ -353,6 +353,30 @@ body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; 
 }
 .key-cap:hover { border-color: var(--accent); color: var(--accent); }
 .key-cap:active { background: var(--accent); color: #000; }
+/* ── key remap modal ─────────────────────────────────────────── */
+.remap-list { display: flex; flex-direction: column; gap: 6px; }
+.remap-row,
+.remap-new {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.remap-key {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-inset);
+  font-size: 0.75rem;
+  color: var(--text-2);
+}
+.remap-arrow { color: var(--text-3); }
+.remap-new .select-input { flex: 1; min-width: 140px; }
+.remap-capture.active { border-color: var(--accent); color: var(--accent); }
+.remap-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+
 /* The pad occupies the strip the hint sits in; the hint's job is done by then
    anyway, since taking a key from the pad is not how you'd lose the keyboard. */
 .control-stage.keys-open .capture-hint { display: none; }

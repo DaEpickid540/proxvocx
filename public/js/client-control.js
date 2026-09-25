@@ -14,11 +14,33 @@ import { ref, set, update } from './firebase.js';
 import { paths } from './paths.js';
 import { iceServers, attachIce, createSession, closeSession, waitForDescription } from './signaling.js';
 import {
-  INPUT_CHANNEL, pointer, pointerRel, wheel, key, text as textEvent, clipboard as clipboardEvent,
-  buttonFromEvent, setFps, switchDisplay, keysUp, streamMode as streamModeEvent,
+  INPUT_CHANNEL, FAST_INPUT_CHANNEL, pointer, pointerRel, wheel, text as textEvent,
+  clipboard as clipboardEvent, buttonFromEvent, setFps, switchDisplay, keysUp,
+  streamMode as streamModeEvent, setResolution as setResolutionEvent, modifierMask,
 } from './input-protocol.js';
+import { loadRemap, resolveKey } from './key-remap.js';
 
 const HIDE_HINT_KEY = 'proxvocx.hideEscHint';
+const SMOOTHING_KEY = 'proxvocx.smoothing';
+
+/**
+ * How long the viewer may hold a frame before showing it, in milliseconds.
+ *
+ * Zero is the lowest possible latency, and it is also why the picture can
+ * look choppy on wifi even when every frame arrives: with no buffer at all,
+ * each frame is shown the instant it lands, so the unevenness of the network
+ * (one frame 5 ms late, the next 25 ms) becomes unevenness on screen. A small
+ * buffer absorbs that and hands frames over at a steady pace, at the cost of
+ * exactly that much extra delay between your hand and the cursor.
+ */
+export const SMOOTHING = {
+  off: { ms: 0, label: 'Off — lowest latency (games on a wired link)' },
+  light: { ms: 40, label: 'Light — steadier picture, about 40 ms more delay' },
+  heavy: { ms: 100, label: 'Heavy — for bad wifi, about 100 ms more delay' },
+};
+
+/** Minimum gap between pointer-move sends: a ~120 Hz ceiling. */
+const MOVE_INTERVAL_MS = 8;
 
 const clamp = (n, min, max) => Math.min(max, Math.max(min, n));
 
@@ -27,6 +49,25 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState, 
 
   let pc = null;
   let channel = null;
+  let fastChannel = null;
+  let videoReceiver = null;
+  let smoothing = loadSmoothing();
+  let keyMap = loadRemap();
+  // Shared by every pointer event on both channels, so the host can tell a
+  // move that was overtaken in flight from a current one.
+  let pointerSeq = 0;
+  // A move that arrived inside the send interval, waiting for the next slot.
+  // It used to be dropped instead, which is harmless mid-motion but not at the
+  // end of one: the last few pixels before the hand stopped were exactly the
+  // ones thrown away, so the PC's cursor came to rest short of the viewer's.
+  let pendingPoint = null;
+  let moveTimer = null;
+  // Why the picture is worse than asked for: the PC's own reason ('cpu',
+  // 'bandwidth') or 'decode' when it is this device that cannot keep up.
+  let hostLimit = 'none';
+  let localLimit = 'none';
+  let lastDropped = null;
+  let resolution = 0;
   let sessionId = null;
   let detachIce = null;
   let statsTimer = null;
@@ -74,7 +115,7 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState, 
    * where it silently rewrites everything typed afterwards — a plain "w"
    * becomes Win+W and the widgets/weather panel opens on its own.
    */
-  const heldKeys = new Map(); // code -> key name
+  const heldKeys = new Map(); // physical code -> { code, key } actually sent
 
   /**
    * One place that knows the whole of what the UI needs, so a caller only has
@@ -98,6 +139,9 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState, 
       streamMode: activeMode,
       frameRate: captureFps,
       mouseLocked,
+      resolution,
+      smoothing,
+      limit: localLimit !== 'none' ? localLimit : hostLimit,
       ...patch,
     });
   }
@@ -126,27 +170,30 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState, 
       activeSourceId = offer.activeSourceId || sources[0]?.id || null;
       activeMode = offer.streamMode || activeMode;
       captureFps = offer.frameRate || captureFps;
+      pointerSeq = 0;
+      hostLimit = 'none';
+      localLimit = 'none';
+      lastDropped = null;
+      resolution = 0;
 
       pc = new RTCPeerConnection({ iceServers: iceServers() });
       detachIce = attachIce(db, machineId, sessionId, pc, 'viewer');
 
       pc.addEventListener('track', (event) => {
         video.srcObject = event.streams[0];
-        // Chromium's video jitter buffer is sized for watching video, where
-        // holding a few hundred milliseconds to smooth arrival is free. Here
-        // it is not free twice over: it is added to the hand-to-cursor delay,
-        // and because the buffer *grows* after a hiccup and then drains, it
-        // turns one late frame into a run of frames delivered in a lump —
-        // which is precisely what a stutter looks like. A remote desktop
-        // wants the frame as soon as it exists.
-        try { event.receiver.jitterBufferTarget = 0; } catch { /* pre-M115 */ }
-        try { event.receiver.playoutDelayHint = 0; } catch { /* not supported */ }
+        videoReceiver = event.receiver;
+        applySmoothing();
         video.play().catch(() => {
           /* Autoplay is allowed because the element is muted; ignore races. */
         });
       });
 
       pc.addEventListener('datachannel', (event) => {
+        if (event.channel.label === FAST_INPUT_CHANNEL) {
+          fastChannel = event.channel;
+          fastChannel.addEventListener('close', () => { fastChannel = null; });
+          return;
+        }
         if (event.channel.label !== INPUT_CHANNEL) return;
         channel = event.channel;
         channel.addEventListener('message', onHostMessage);
@@ -202,6 +249,14 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState, 
 
     try { channel?.close(); } catch { /* already closed */ }
     channel = null;
+    try { fastChannel?.close(); } catch { /* already closed */ }
+    fastChannel = null;
+    videoReceiver = null;
+    clearTimeout(moveTimer);
+    moveTimer = null;
+    pendingPoint = null;
+    pendingDX = 0;
+    pendingDY = 0;
 
     try { pc?.close(); } catch { /* already closed */ }
     pc = null;
@@ -239,9 +294,15 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState, 
   function onHostMessage(event) {
     let message;
     try { message = JSON.parse(event.data); } catch { return; }
+    if (message?.t === 'q') {
+      hostLimit = typeof message.r === 'string' ? message.r : 'none';
+      emitState();
+      return;
+    }
     if (message?.t !== 'cfg') return;
 
     if (typeof message.id === 'string') activeSourceId = message.id;
+    if (Number.isFinite(message.res)) resolution = message.res;
     if (Number.isFinite(message.fps)) captureFps = message.fps;
     if (typeof message.sm === 'string') activeMode = message.sm;
     emitState();
@@ -265,6 +326,47 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState, 
     if (!hostAllowsInput) return;
     sendConfig(event);
   };
+
+  /** An absolute cursor move, over the fast channel when there is one. */
+  function sendMove(point) {
+    if (!hostAllowsInput) return;
+    const message = pointer('move', point.x, point.y, 'left', false, ++pointerSeq);
+    if (fastChannel?.readyState === 'open') {
+      try {
+        fastChannel.send(JSON.stringify(message));
+        return;
+      } catch {
+        /* Fall through to the reliable channel. */
+      }
+    }
+    send(message);
+  }
+
+  /** Sends whatever motion is waiting — absolute, relative, or both. */
+  function flushPointer() {
+    clearTimeout(moveTimer);
+    moveTimer = null;
+    lastMoveSent = performance.now();
+    if (pendingDX || pendingDY) {
+      send(pointerRel(pendingDX, pendingDY));
+      pendingDX = 0;
+      pendingDY = 0;
+    }
+    if (pendingPoint) {
+      sendMove(pendingPoint);
+      pendingPoint = null;
+    }
+  }
+
+  /**
+   * Sends now if the interval allows, otherwise makes sure the waiting motion
+   * goes out as soon as it does — never later, and never not at all.
+   */
+  function schedulePointerFlush() {
+    const wait = MOVE_INTERVAL_MS - (performance.now() - lastMoveSent);
+    if (wait <= 0) flushPointer();
+    else if (!moveTimer) moveTimer = setTimeout(flushPointer, wait);
+  }
 
   /**
    * Maps a pointer position inside the letterboxed <video> onto 0..1 of the
@@ -305,45 +407,42 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState, 
         // replay. Only the SEND is throttled — the deltas above still
         // accumulate every frame, so nothing throttled away is lost, just
         // batched into the next one.
-        const now = performance.now();
-        if (now - lastMoveSent < 8) return;
-        lastMoveSent = now;
-        if (!pendingDX && !pendingDY) return;
-        send(pointerRel(pendingDX, pendingDY));
-        pendingDX = 0;
-        pendingDY = 0;
+        schedulePointerFlush();
         return;
       }
 
-      const now = performance.now();
-      if (now - lastMoveSent < 8) return;
       const point = toScreenPoint(event);
       if (!point.inside) return;
-      lastMoveSent = now;
-      send(pointer('move', point.x, point.y));
+      pendingPoint = point;
+      schedulePointerFlush();
     });
 
     video.addEventListener('pointerdown', (event) => {
       event.preventDefault();
       captureKeyboard();
+      // Motion still waiting for its slot happened *before* this press, so it
+      // has to reach the PC before it too — or a quick move-and-click lands
+      // the click short of where it was aimed.
+      flushPointer();
       if (mouseLocked) {
-        send(pointer('down', 0, 0, buttonFromEvent(event), true));
+        send(pointer('down', 0, 0, buttonFromEvent(event), true, ++pointerSeq));
         return;
       }
       const point = toScreenPoint(event);
       if (!point.inside) return;
-      send(pointer('down', point.x, point.y, buttonFromEvent(event)));
+      send(pointer('down', point.x, point.y, buttonFromEvent(event), false, ++pointerSeq));
     });
 
     video.addEventListener('pointerup', (event) => {
       event.preventDefault();
+      flushPointer();
       if (mouseLocked) {
-        send(pointer('up', 0, 0, buttonFromEvent(event), true));
+        send(pointer('up', 0, 0, buttonFromEvent(event), true, ++pointerSeq));
         return;
       }
       const point = toScreenPoint(event);
       if (!point.inside) return;
-      send(pointer('up', point.x, point.y, buttonFromEvent(event)));
+      send(pointer('up', point.x, point.y, buttonFromEvent(event), false, ++pointerSeq));
     });
 
     // No `dblclick` forwarding: the two press/release pairs that produce it
@@ -361,6 +460,7 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState, 
       const point = toScreenPoint(event);
       if (!point.inside) return;
       event.preventDefault();
+      flushPointer();
       // The host works in pixels, but `deltaX/Y` are only pixels when
       // `deltaMode` says so — a wheel reporting in lines or pages sends 3 or
       // 1, which arrived as three pixels of scroll and looked like the wheel
@@ -419,6 +519,33 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState, 
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) releaseHeldKeys();
     });
+
+    // Keyboard Lock is what lets keys the OS normally keeps for itself reach
+    // the page, and browsers only honour it in fullscreen. Entering
+    // fullscreen with the keyboard already captured has to take the lock
+    // then; leaving drops it on its own.
+    document.addEventListener('fullscreenchange', () => {
+      if (captured) lockSystemKeys();
+    });
+  }
+
+  /**
+   * Asks the browser to hand the page keys the OS would otherwise take —
+   * Search/Launcher on a Chromebook, Alt+Tab, the Windows key. Only works in
+   * fullscreen; outside it this is a no-op and the OS keeps those keys, which
+   * is why a Search → Shift remap still opens the ChromeOS launcher in a
+   * window.
+   *
+   * Chrome keeps a long press of Escape as the way out of a lock, so a plain
+   * Escape still arrives here and still releases the keyboard as always.
+   */
+  function lockSystemKeys() {
+    if (!document.fullscreenElement || !navigator.keyboard?.lock) return;
+    navigator.keyboard.lock().catch(() => { /* refused or unsupported */ });
+  }
+
+  function unlockSystemKeys() {
+    try { navigator.keyboard?.unlock?.(); } catch { /* unsupported */ }
   }
 
   function onKeyDown(event) {
@@ -429,15 +556,22 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState, 
       return;
     }
     event.preventDefault();
-    if (event.code) heldKeys.set(event.code, event.key);
-    send(key('down', event));
+    // The remap is resolved on the *down* and remembered, so the release
+    // always matches what was pressed — even if the rules change, or the key
+    // is let go after capture has moved on.
+    const target = heldKeys.get(event.code) || resolveKey(keyMap, event.code, event.key);
+    if (!target) return; // remapped to nothing
+    if (event.code) heldKeys.set(event.code, target);
+    send({ t: 'k', a: 'down', key: target.key, code: target.code, m: modifierMask(event) });
   }
 
   function onKeyUp(event) {
     if (!captured) return;
     event.preventDefault();
-    if (event.code) heldKeys.delete(event.code);
-    send(key('up', event));
+    const target = heldKeys.get(event.code) || resolveKey(keyMap, event.code, event.key);
+    heldKeys.delete(event.code);
+    if (!target) return;
+    send({ t: 'k', a: 'up', key: target.key, code: target.code, m: modifierMask(event) });
   }
 
   /**
@@ -448,8 +582,8 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState, 
    * session, or one whose keydown we sent just before the channel dropped.
    */
   function releaseHeldKeys() {
-    for (const [code, keyName] of heldKeys) {
-      send({ t: 'k', a: 'up', key: keyName, code, m: 0 });
+    for (const sent of heldKeys.values()) {
+      send({ t: 'k', a: 'up', key: sent.key, code: sent.code, m: 0 });
     }
     heldKeys.clear();
     send(keysUp());
@@ -469,12 +603,14 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState, 
     // has not moved — the next pointermove then maps to a different part of
     // the remote screen and the PC's cursor jumps vertically for no reason.
     video.focus({ preventScroll: true });
+    lockSystemKeys();
   }
 
   function releaseKeyboard() {
     if (document.pointerLockElement === video) document.exitPointerLock();
     if (!captured) return;
     captured = false;
+    unlockSystemKeys();
     // Before `captured` stops us forwarding anything, hand back whatever is
     // still down — otherwise dropping capture mid-chord latches it on the PC.
     releaseHeldKeys();
@@ -492,14 +628,25 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState, 
         const report = await pc.getStats();
         let rtt = null;
         let fps = null;
+        let dropped = null;
         report.forEach((entry) => {
           if (entry.type === 'candidate-pair' && entry.state === 'succeeded' && entry.currentRoundTripTime != null) {
             rtt = Math.round(entry.currentRoundTripTime * 1000);
           }
           if (entry.type === 'inbound-rtp' && entry.kind === 'video') {
             fps = Math.round(entry.framesPerSecond || 0);
+            dropped = entry.framesDropped ?? null;
           }
         });
+        // Frames that arrived whole and were thrown away on this side are
+        // this device failing to decode or draw in time — a weak Chromebook
+        // on 1080p60 VP9, typically. Neither the PC nor the link can fix
+        // that; a lower resolution or frame rate can.
+        if (dropped != null && lastDropped != null) {
+          const perSecond = (dropped - lastDropped) / 2;
+          localLimit = perSecond > Math.max(2, (fps || 0) * 0.1) ? 'decode' : 'none';
+        }
+        lastDropped = dropped;
         emitState({ connected: true, status: 'connected', rtt, fps });
       } catch {
         /* getStats can throw during teardown */
@@ -514,6 +661,25 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState, 
     overlayMessage.textContent = message;
     connectBtn.hidden = !showButton;
     overlay.hidden = false;
+  }
+
+  function loadSmoothing() {
+    try {
+      const saved = localStorage.getItem(SMOOTHING_KEY);
+      return SMOOTHING[saved] ? saved : 'light';
+    } catch {
+      return 'light';
+    }
+  }
+
+  function applySmoothing() {
+    if (!videoReceiver) return;
+    const { ms } = SMOOTHING[smoothing] || SMOOTHING.light;
+    // `jitterBufferTarget` is the standard knob (milliseconds);
+    // `playoutDelayHint` is Chromium's older one (seconds). Setting both
+    // covers browsers that only have one.
+    try { videoReceiver.jitterBufferTarget = ms; } catch { /* pre-M115 */ }
+    try { videoReceiver.playoutDelayHint = ms / 1000; } catch { /* not supported */ }
   }
 
   bindInput();
@@ -588,6 +754,26 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState, 
     setFrameRate(fps) {
       captureFps = fps;
       sendConfig(setFps(fps));
+    },
+
+    /** Caps the height the PC sends at, 0 for everything it captures. */
+    setResolution(height) {
+      resolution = height;
+      sendConfig(setResolutionEvent(height));
+    },
+
+    /** Trades a little latency for evenly paced frames; see SMOOTHING. */
+    setSmoothing(value) {
+      if (!SMOOTHING[value]) return;
+      smoothing = value;
+      try { localStorage.setItem(SMOOTHING_KEY, value); } catch { /* private mode */ }
+      applySmoothing();
+      emitState();
+    },
+
+    /** Picks up remap rules saved since this viewer was created. */
+    reloadKeyRemap() {
+      keyMap = loadRemap();
     },
 
     /** Switches which display the host is capturing without reconnecting. */
