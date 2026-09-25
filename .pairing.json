@@ -1,0 +1,12 @@
+{
+  "hostingUrl": "https://proxvocx.web.app",
+  "projectId": "personal-suite-ca587",
+  "apiKey": "AIzaSyAtRLYEN30W1eL4EwiRGN4x_oOzI-HlJZQ",
+  "deviceUid": "OhIHXsxJRWXTZHF6w4WQQUJ91CT2",
+  "ownerUid": "IzGKR0Q89qN0PyyJ4jpN9YKDd252",
+  "idToken": "eyJhbGciOiJSUzI1NiIsImtpZCI6ImFhMmNiOTcyNTIzMzc3ZWRlMjE2MzQwYmNkNTg4MTA0MTQxZTYxY2MiLCJ0eXAiOiJKV1QifQ.eyJwcm92aWRlcl9pZCI6ImFub255bW91cyIsImlzcyI6Imh0dHBzOi8vc2VjdXJldG9rZW4uZ29vZ2xlLmNvbS9wZXJzb25hbC1zdWl0ZS1jYTU4NyIsImF1ZCI6InBlcnNvbmFsLXN1aXRlLWNhNTg3IiwiYXV0aF90aW1lIjoxNzg3Nzc5NDQ1LCJ1c2VyX2lkIjoiT2hJSFhzeEpSV1hUWkhGNnc0V1FRVUo5MUNUMiIsInN1YiI6Ik9oSUhYc3hKUldYVFpIRjZ3NFdRUVVKOTFDVDIiLCJpYXQiOjE3ODc3Nzk0NDUsImV4cCI6MTc4Nzc4MzA0NSwiZmlyZWJhc2UiOnsiaWRlbnRpdGllcyI6e30sInNpZ25faW5fcHJvdmlkZXIiOiJhbm9ueW1vdXMifX0.t7wlBRUEWKTgupKY9RCIkRU17LrvqHa3kvxFEKCyk-gHAutiiUtQQA32jQllGtUI8PCzTuuxRKOwNbt7ZoibaS43mRhVb2AsN4LsabI9gO9QMnhfaCUmxFHStc-yreN-OS-oq0EcsMCKmav4_b6xj2TjOl2kVXX0gLs_HSqDJC2fKLW3XcueZfwHMThRLKXSH8eCHYXj7Z3-qEvLhHLEUqQ8hIJ3mrEiSVUI8-QBZpW3RH98MTW8hzv_k6oafRfx_7ngbv1vRhWAxSEusDy20bS_rI6I45loyIf7EXgVxxnpXukgJj58y2SDMnTvW7QpM2hjL21OStsCvZge9wHW_A",
+  "refreshToken": "AMf-vBxvPu92CbHcgqUf6Fx37uDuvkQffbL7Sk7FmovK0IqN8msHcXoAQYAiuOJrtZfsO-l6gnpodzDlvkzM-FHlAqgBp_kZd7H_I_HmDt1ZjGewNNy1--CwcuCPTFvFjgffM1v08HXk-T1wzMeuk-Q3wOECpSX0QCsd0OEETlCr04E6qtoiOzBHcFlSqJwQkqNooONsAYwQ",
+  "idTokenExpiresAt": 1787783045981,
+  "deviceLabel": "PC Connector",
+  "connectedAt": "2026-08-26T21:24:05.981Z"
+}

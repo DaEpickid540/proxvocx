@@ -1,0 +1,12 @@
+{
+  "hostingUrl": "https://proxvocx.web.app",
+  "projectId": "personal-suite-ca587",
+  "apiKey": "AIzaSyAtRLYEN30W1eL4EwiRGN4x_oOzI-HlJZQ",
+  "deviceUid": "9Xel0I711IPOy2wrsX3er2u4y1i2",
+  "ownerUid": "IzGKR0Q89qN0PyyJ4jpN9YKDd252",
+  "idToken": "eyJhbGciOiJSUzI1NiIsImtpZCI6ImFhMmNiOTcyNTIzMzc3ZWRlMjE2MzQwYmNkNTg4MTA0MTQxZTYxY2MiLCJ0eXAiOiJKV1QifQ.eyJwcm92aWRlcl9pZCI6ImFub255bW91cyIsImlzcyI6Imh0dHBzOi8vc2VjdXJldG9rZW4uZ29vZ2xlLmNvbS9wZXJzb25hbC1zdWl0ZS1jYTU4NyIsImF1ZCI6InBlcnNvbmFsLXN1aXRlLWNhNTg3IiwiYXV0aF90aW1lIjoxNzg3NzgxOTc1LCJ1c2VyX2lkIjoiOVhlbDBJNzExSVBPeTJ3cnNYM2VyMnU0eTFpMiIsInN1YiI6IjlYZWwwSTcxMUlQT3kyd3JzWDNlcjJ1NHkxaTIiLCJpYXQiOjE3ODc3ODE5NzUsImV4cCI6MTc4Nzc4NTU3NSwiZmlyZWJhc2UiOnsiaWRlbnRpdGllcyI6e30sInNpZ25faW5fcHJvdmlkZXIiOiJhbm9ueW1vdXMifX0.Zmo_f6yAYy4IxsROv8OstROGhN0jrYnPAkSKrKHwltIegPNVQ0MI3kvoB-l1CiJPi40hKSDuurX8haXOsaEpqpuGoSjCtlmvJRxa5KuHW_Pl4qvM0ekrYWXPMemv3U7mZCavQUDAhPH5HprMRX7bmksVrvdDf8v_9pLdNyEt2D6Kk9ooUOQfkyYe2301Y8i1uPAHRvzGZrW4qnQUTtQq3_W_xWUvA1EPfk5sR9bjVTeQkiC-p-1MuEo6bBvhjVYSQ3MfeGGQkHxR01rh3QlJXwtmu1dxcS8qkWqlb_dgpADOkxftLfnkq3-90k5YRuoVmj0bB3cE1V67XTbMF846Mw",
+  "refreshToken": "AMf-vBwzgAIqmiZVGFMyRBnXNkYcW8Hzus-DZMdcrDVg1CZplzpGRVC5kWOY33lh4_RfgJGKXa04iIBn9qjbX5j1AVq3ntmZm_oMolme6Fz5CVPxzV6wqIp37V0QGwiF0aK7A0fkloPgsbpFefuBKN8IOU55llVC68ttf_tSRINyGA_-Nj47s-1RF6-Tha8ojF-RSGo-DKZz",
+  "idTokenExpiresAt": 1787785575464,
+  "deviceLabel": "Remote control",
+  "connectedAt": "2026-08-26T22:06:15.464Z"
+}
