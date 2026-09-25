@@ -605,8 +605,8 @@ export function createMiniBrowser({ db, getMachineId, elements, onStatus, reques
       updateNavButtons();
       showOverlay(
         'Browse through your PC',
-        'Pages are fetched by the connector on your PC and handed back through ' +
-        'Firebase. Nothing on this device talks to the site directly.',
+        'Every page is fetched by your PC and handed back over a direct ' +
+        'connection. Nothing on this device talks to the site itself.',
       );
     },
     get current() { return history[cursor] || null; },

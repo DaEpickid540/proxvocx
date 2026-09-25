@@ -1,6 +1,6 @@
 {
   "name": "proxvocx",
-  "version": "2.18.0",
+  "version": "2.19.0",
   "description": "Firebase-brokered PC connector: browse the web through your PC, or take it over outright. One desktop install, one hosted site, no Cloud Functions.",
   "type": "module",
   "main": "desktop/main.js",
@@ -15,7 +15,11 @@
     "build:win": "electron-builder --win",
     "build:mac": "electron-builder --mac",
     "build:linux": "electron-builder --linux",
-    "deploy": "firebase deploy --only hosting,database"
+    "deploy": "firebase deploy --only hosting,database",
+    "site:browse": "npx --yes serve -l 5001 public-browse"
+  },
+  "dependencies": {
+    "ws": "^8.18.3"
   },
   "devDependencies": {
     "electron": "^31.3.1",
@@ -59,6 +63,6 @@
       "category": "Utility"
     }
   },
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "private": true
 }

@@ -19,6 +19,21 @@ contextBridge.exposeInMainWorld('proxvocx', {
   /** Cross-origin HTTP, SSRF-guarded, performed in the main process. */
   fetch: (request) => ipcRenderer.invoke('proxvocx:fetch', request),
 
+  /**
+   * The native Browser-mode engine's network: a request exactly as a browser
+   * would send it (cookies, all headers, binary body, no redirect following),
+   * and WebSockets opened from the PC with events streamed back.
+   */
+  rawFetch: (request) => ipcRenderer.invoke('proxvocx:rawFetch', request),
+  wsOpen: (request) => ipcRenderer.invoke('proxvocx:wsOpen', request),
+  wsSend: (id, data) => ipcRenderer.send('proxvocx:wsSend', { id, data }),
+  wsClose: (id, code, reason) => ipcRenderer.send('proxvocx:wsClose', { id, code, reason }),
+  onWsEvent: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('proxvocx:wsEvent', listener);
+    return () => ipcRenderer.removeListener('proxvocx:wsEvent', listener);
+  },
+
   listScreenSources: () => ipcRenderer.invoke('proxvocx:screenSources'),
 
   inputAvailable: () => ipcRenderer.invoke('proxvocx:inputAvailable'),

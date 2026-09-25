@@ -40,6 +40,9 @@ export const hostBridge = {
     input: !!native?.injectInput,
     /** A real, scripted browser tab on the PC's own network. Desktop-only. */
     scripts: !!native?.scriptedOpen,
+    /** Browser-exact requests and relayed WebSockets, for the native engine. */
+    rawFetch: !!native?.rawFetch,
+    websockets: !!native?.wsOpen,
   },
 
   /**
@@ -56,6 +59,21 @@ export const hostBridge = {
     }
     return this.capabilities;
   },
+
+  /** A browser-exact request for the native engine; see desktop/bridge/raw-fetch.js. */
+  async rawFetch(request) {
+    if (!native?.rawFetch) throw new Error('the desktop app is required to proxy requests');
+    return native.rawFetch(request);
+  },
+
+  /** Relayed WebSockets; events for every socket arrive through onWsEvent. */
+  wsOpen(request) {
+    if (!native?.wsOpen) return Promise.reject(new Error('this PC cannot open WebSockets'));
+    return native.wsOpen(request);
+  },
+  wsSend(id, data) { native?.wsSend?.(id, data); },
+  wsClose(id, code, reason) { native?.wsClose?.(id, code, reason); },
+  onWsEvent(callback) { return native?.onWsEvent?.(callback) || (() => {}); },
 
   /** Performs a proxied HTTP request. Rejects when there is no native host. */
   async fetch(request) {

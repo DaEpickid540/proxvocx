@@ -127,6 +127,11 @@ body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; 
 .browser-stage[data-state="empty"] .browser-frame,
 .browser-stage[data-state="loading"] .browser-frame { visibility: hidden; }
 
+/* The native engine's frame is added by client-native-browser.js. */
+.browser-frame--native { position: absolute; inset: 0; }
+.engine-select { max-width: 11rem; flex-shrink: 1; min-width: 0; }
+@media (max-width: 640px) { .engine-select { max-width: 6.5rem; } }
+
 /* Scripted mode swaps the iframe for a live video of a real browser tab. */
 .browser-frame--scripted {
   background: #000;

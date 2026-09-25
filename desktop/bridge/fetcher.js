@@ -49,7 +49,7 @@ function normalizeHeaders(headers, userAgent) {
 }
 
 /** Read at most `limit` bytes from the body; report whether it was cut short. */
-async function readCappedBody(response, limit) {
+export async function readCappedBody(response, limit) {
   if (!response.body) return { buffer: Buffer.alloc(0), truncated: false, bytes: 0 };
   const chunks = [];
   let bytes = 0;

@@ -20,6 +20,8 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 import { fetchThroughProxy, FetchFailedError } from './bridge/fetcher.js';
+import { rawFetch } from './bridge/raw-fetch.js';
+import { openSocket, sendSocket, closeSocket, closeAllFor } from './bridge/ws-relay.js';
 import { UrlRejectedError } from './bridge/safe-url.js';
 import { injectInput, inputAvailable, inputStatus, releaseAll } from './bridge/input.js';
 import { startStaticServer, packagedPublicDir } from './bridge/static-server.js';
@@ -55,6 +57,8 @@ const FETCH_CONFIG = {
 };
 /** Hard ceiling for the direct fast lane's per-response size (see pc-fetch.js). */
 const FAST_LANE_MAX_BYTES = 16 * 1024 * 1024;
+/** webContents ids that have opened a relayed WebSocket, for cleanup. */
+const wsOwners = new Set();
 
 /**
  * Nothing launches this app from a terminal — it is started by the installer,
@@ -342,6 +346,37 @@ function registerIpc() {
       throw wrapped;
     }
   });
+
+  /* ── native Browser-mode engine: a browser's network stack, on the PC ── */
+
+  ipcMain.handle('proxvocx:rawFetch', async (_event, request) => {
+    try {
+      return await rawFetch(request, { ...FETCH_CONFIG, maxResponseBytes: FAST_LANE_MAX_BYTES });
+    } catch (err) {
+      const wrapped = new Error(err.message);
+      wrapped.name = err instanceof UrlRejectedError ? 'ERR_URL_REJECTED'
+        : err instanceof FetchFailedError ? err.code
+        : 'ERR_FETCH_FAILED';
+      throw wrapped;
+    }
+  });
+
+  ipcMain.handle('proxvocx:wsOpen', async (event, request) => {
+    const owner = event.sender.id;
+    if (!wsOwners.has(owner)) {
+      wsOwners.add(owner);
+      event.sender.once('destroyed', () => {
+        wsOwners.delete(owner);
+        closeAllFor(owner);
+      });
+    }
+    await openSocket(owner, request, FETCH_CONFIG, (payload) => {
+      if (!event.sender.isDestroyed()) event.sender.send('proxvocx:wsEvent', payload);
+    });
+    return true;
+  });
+  ipcMain.on('proxvocx:wsSend', (event, { id, data }) => sendSocket(event.sender.id, id, data));
+  ipcMain.on('proxvocx:wsClose', (event, { id, code, reason }) => closeSocket(event.sender.id, id, code, reason));
 
   ipcMain.handle('proxvocx:screenSources', async () => {
     const sources = await desktopCapturer.getSources({

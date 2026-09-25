@@ -18,16 +18,39 @@
  * this channel is still connecting, or when it cannot connect at all (a
  * network that needs a TURN relay, an older connector, rules not yet deployed).
  *
- * Wire format on the channel (label FETCH_CHANNEL):
- *   client → PC   {"t":"req","id":N,"url",...}         one JSON message
- *                 {"t":"cancel","id":N}                 drop it if not started
- *   PC → client   {"t":"res","id":N,"n":K,"meta":{…}}   everything but the body
- *                 "N\n<chunk>" × K                      the body, in order
- *                 {"t":"err","id":N,"error","code"}
+ * The same channel also carries the native engine's traffic (Scramjet, in
+ * the viewer's browser): requests exactly as a browser would send them, with
+ * binary bodies both ways, and WebSockets opened from the PC.
+ *
+ * Wire format on the channel (label FETCH_CHANNEL). JSON unless noted; binary
+ * frames are described in lane-frames.js.
+ *
+ *   script-free engine
+ *     client → PC   {"t":"req","id","url",...}             one JSON message
+ *     PC → client   {"t":"res","id","n":K,"meta":{…}}       everything but the body
+ *                   "id\n<chunk>" × K                        the body, as text
+ *   native engine
+ *     client → PC   {"t":"rreq","id","url","method","headers","parts":K}
+ *                   REQUEST_BODY frame × K
+ *     PC → client   {"t":"rres","id","status","statusText","headers","parts":K}
+ *                   RESPONSE_BODY frame × K
+ *     client → PC   {"t":"wso","id","url","protocols","headers"}   open a socket
+ *                   {"t":"wss","id","d"} or WS_BINARY frame          send
+ *                   {"t":"wsc","id","code","reason"}                 close
+ *     PC → client   {"t":"wsopen","id","protocol"}  {"t":"wsm","id","d"}
+ *                   WS_BINARY frame  {"t":"wsclose","id","code","reason"}
+ *                   {"t":"wserr","id","error"}
+ *   both
+ *     client → PC   {"t":"cancel","id"}                     drop it if not started
+ *     PC → client   {"t":"err","id","error","code"}
+ *
+ * What this PC supports is announced in the offer (`features`), so a newer
+ * viewer knows not to try the native engine against an older connector.
  */
 import { ref, set, update, remove, onValue, onChildAdded, onChildRemoved, get } from './firebase.js';
 import { paths } from './paths.js';
 import { iceServers, attachIce, SESSION_MAX_AGE_MS } from './signaling.js';
+import { FRAME, encodeFrame, decodeFrame, splitBytes, joinParts } from './lane-frames.js';
 
 export const FETCH_CHANNEL = 'fetch';
 
@@ -38,6 +61,10 @@ export const FETCH_CHUNK_CHARS = 60_000;
 export const FETCH_MAX_BYTES = 8 * 1024 * 1024;
 
 const MAX_CONCURRENT = 8;
+/** A native-engine page is dozens of requests at once; the PC's side is cheap. */
+const MAX_CONCURRENT_RAW = 16;
+/** Sockets one viewer may hold open through this PC at once. */
+const MAX_SOCKETS = 48;
 /** Pause sending above this much queued in the channel, resume below LOW. */
 const BUFFER_HIGH = 4 * 1024 * 1024;
 const BUFFER_LOW = 1 * 1024 * 1024;
@@ -67,6 +94,23 @@ export function startFetchHost({ db, machineId, bridge, log, onStat, getSettings
 
   const stopRemoved = onChildRemoved(sessionsRef, (snapshot) => teardown(snapshot.key));
 
+  // Socket events for every session arrive on one listener; the id carries
+  // the session they belong to ("sessionId:socketId").
+  const stopWsEvents = bridge.onWsEvent?.((event) => {
+    const cut = String(event.id).lastIndexOf(':');
+    const entry = active.get(String(event.id).slice(0, cut));
+    const id = Number(String(event.id).slice(cut + 1));
+    if (!entry || !entry.sockets.has(id)) return;
+    if (event.type === 'open') reply(entry, { t: 'wsopen', id, protocol: event.protocol || '' });
+    else if (event.type === 'message' && event.binary) sendRaw(entry, encodeFrame(id, FRAME.WS_BINARY, event.data));
+    else if (event.type === 'message') reply(entry, { t: 'wsm', id, d: event.data });
+    else if (event.type === 'error') reply(entry, { t: 'wserr', id, error: event.message || 'socket error' });
+    else if (event.type === 'close') {
+      entry.sockets.delete(id);
+      reply(entry, { t: 'wsclose', id, code: event.code || 1005, reason: event.reason || '' });
+    }
+  }) || (() => {});
+
   async function accept(sessionId, session) {
     const settings = getSettings?.() || {};
 
@@ -87,10 +131,17 @@ export function startFetchHost({ db, machineId, bridge, log, onStat, getSettings
 
     const pc = new RTCPeerConnection({ iceServers: iceServers(settings.turn) });
     const channel = pc.createDataChannel(FETCH_CHANNEL, { ordered: true });
+    channel.binaryType = 'arraybuffer';
     channel.bufferedAmountLowThreshold = BUFFER_LOW;
     const detachIce = attachIce(db, machineId, sessionId, pc, 'host');
 
-    const entry = { pc, channel, detachIce, queue: [], inFlight: 0, cancelled: new Set() };
+    const entry = {
+      sessionId, pc, channel, detachIce,
+      queue: [], inFlight: 0, cancelled: new Set(),
+      /** Native-engine requests still waiting for their body frames. */
+      uploads: new Map(),
+      sockets: new Set(),
+    };
     active.set(sessionId, entry);
 
     channel.addEventListener('message', (event) => onMessage(entry, event.data));
@@ -101,7 +152,14 @@ export function startFetchHost({ db, machineId, bridge, log, onStat, getSettings
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    await set(ref(db, paths.sessionOffer(machineId, sessionId)), { type: offer.type, sdp: offer.sdp });
+    await set(ref(db, paths.sessionOffer(machineId, sessionId)), {
+      type: offer.type,
+      sdp: offer.sdp,
+      features: {
+        raw: !!bridge.capabilities.rawFetch,
+        ws: !!bridge.capabilities.websockets,
+      },
+    });
     await update(ref(db, paths.session(machineId, sessionId)), { state: 'offered' });
 
     entry.stopAnswer = onValue(ref(db, paths.sessionAnswer(machineId, sessionId)), async (snap) => {
@@ -118,28 +176,130 @@ export function startFetchHost({ db, machineId, bridge, log, onStat, getSettings
   }
 
   function onMessage(entry, raw) {
+    if (raw instanceof ArrayBuffer) {
+      onFrame(entry, decodeFrame(raw));
+      return;
+    }
     let message;
     try { message = JSON.parse(raw); } catch { return; }
     if (!Number.isInteger(message?.id)) return;
-    if (message.t === 'cancel') {
-      entry.cancelled.add(message.id);
-      return;
+    switch (message.t) {
+      case 'cancel':
+        entry.cancelled.add(message.id);
+        entry.uploads.delete(message.id);
+        return;
+      case 'req':
+        if (typeof message.url !== 'string') return;
+        entry.queue.push(message);
+        pump(entry);
+        return;
+      case 'rreq': {
+        if (typeof message.url !== 'string') return;
+        const parts = Math.max(0, Number(message.parts) || 0);
+        if (parts === 0) {
+          entry.queue.push({ ...message, raw: true, body: null });
+          pump(entry);
+        } else {
+          entry.uploads.set(message.id, { job: { ...message, raw: true }, expected: parts, parts: [] });
+        }
+        return;
+      }
+      case 'wso': return openSocket(entry, message);
+      case 'wss': return sendSocket(entry, message.id, typeof message.d === 'string' ? message.d : '');
+      case 'wsc': return closeSocket(entry, message.id, message.code, message.reason);
+      default:
     }
-    if (message.t !== 'req' || typeof message.url !== 'string') return;
-    entry.queue.push(message);
-    pump(entry);
+  }
+
+  function onFrame(entry, frame) {
+    if (frame.kind === FRAME.REQUEST_BODY) {
+      const upload = entry.uploads.get(frame.id);
+      if (!upload) return;
+      upload.parts.push(frame.bytes.slice());
+      if (upload.parts.length < upload.expected) return;
+      entry.uploads.delete(frame.id);
+      entry.queue.push({ ...upload.job, body: new Uint8Array(joinParts(upload.parts)) });
+      pump(entry);
+    } else if (frame.kind === FRAME.WS_BINARY) {
+      sendSocket(entry, frame.id, frame.bytes.slice());
+    }
   }
 
   function pump(entry) {
-    while (entry.inFlight < MAX_CONCURRENT && entry.queue.length) {
+    const limit = entry.queue.some((job) => job.raw) ? MAX_CONCURRENT_RAW : MAX_CONCURRENT;
+    while (entry.inFlight < limit && entry.queue.length) {
       const job = entry.queue.shift();
       if (entry.cancelled.delete(job.id)) continue;
       entry.inFlight += 1;
-      handle(entry, job).finally(() => {
+      (job.raw ? handleRaw(entry, job) : handle(entry, job)).finally(() => {
         entry.inFlight -= 1;
         pump(entry);
       });
     }
+  }
+
+  /** A native-engine request: browser-exact, bytes in and bytes out. */
+  async function handleRaw(entry, job) {
+    if (getSettings?.().allowProxy === false || !bridge.capabilities.rawFetch) {
+      return reply(entry, { t: 'err', id: job.id, error: 'The PC is not serving browser traffic.', code: 'ERR_REFUSED' });
+    }
+    try {
+      const result = await bridge.rawFetch({
+        url: job.url,
+        method: job.method || 'GET',
+        headers: job.headers && typeof job.headers === 'object' ? job.headers : {},
+        body: job.body || null,
+      });
+      onStat?.('requests', 1);
+      onStat?.('bytes', result.body?.byteLength || 0);
+      const parts = splitBytes(result.body || new Uint8Array(0));
+      await reply(entry, {
+        t: 'rres',
+        id: job.id,
+        status: result.status,
+        statusText: result.statusText,
+        headers: result.headers,
+        truncated: !!result.truncated,
+        parts: parts.length,
+      });
+      for (const part of parts) await sendRaw(entry, encodeFrame(job.id, FRAME.RESPONSE_BODY, part));
+    } catch (err) {
+      onStat?.('errors', 1);
+      await reply(entry, { t: 'err', id: job.id, error: cleanIpcError(err), code: err.code || 'ERR_UNREACHABLE' });
+    }
+  }
+
+  async function openSocket(entry, message) {
+    const { id } = message;
+    const refuse = (error) => reply(entry, { t: 'wserr', id, error }).then(() =>
+      reply(entry, { t: 'wsclose', id, code: 1006, reason: '' }));
+    if (getSettings?.().allowProxy === false || !bridge.capabilities.websockets) {
+      return refuse('This PC does not relay WebSockets.');
+    }
+    if (entry.sockets.size >= MAX_SOCKETS || entry.sockets.has(id) || typeof message.url !== 'string') {
+      return refuse('WebSocket refused.');
+    }
+    entry.sockets.add(id);
+    try {
+      await bridge.wsOpen({
+        id: `${entry.sessionId}:${id}`,
+        url: message.url,
+        protocols: Array.isArray(message.protocols) ? message.protocols.map(String) : [],
+        headers: message.headers && typeof message.headers === 'object' ? message.headers : {},
+      });
+    } catch (err) {
+      entry.sockets.delete(id);
+      return refuse(cleanIpcError(err));
+    }
+    return undefined;
+  }
+
+  function sendSocket(entry, id, data) {
+    if (entry.sockets.has(id)) bridge.wsSend(`${entry.sessionId}:${id}`, data);
+  }
+
+  function closeSocket(entry, id, code, reason) {
+    if (entry.sockets.has(id)) bridge.wsClose(`${entry.sessionId}:${id}`, Number(code) || 1000, String(reason || ''));
   }
 
   async function handle(entry, job) {
@@ -181,8 +341,21 @@ export function startFetchHost({ db, machineId, bridge, log, onStat, getSettings
 
   const reply = (entry, message) => sendRaw(entry, JSON.stringify(message));
 
-  /** Sends, waiting for the channel to drain first if it is backed up. */
-  async function sendRaw(entry, data) {
+  /**
+   * Sends, waiting for the channel to drain first if it is backed up.
+   *
+   * Every send for a session goes through one chain, so nothing overtakes
+   * anything sent before it. Waiting per call was not enough: a message sent
+   * while an earlier one waited for the buffer to drop below the high mark
+   * could find it already below, go straight out, and land first — which,
+   * for body frames or a socket's messages, is corruption.
+   */
+  function sendRaw(entry, data) {
+    entry.sendChain = (entry.sendChain || Promise.resolve()).then(() => sendNow(entry, data));
+    return entry.sendChain;
+  }
+
+  async function sendNow(entry, data) {
     const { channel } = entry;
     if (channel.readyState !== 'open') return;
     if (channel.bufferedAmount > BUFFER_HIGH) {
@@ -209,6 +382,9 @@ export function startFetchHost({ db, machineId, bridge, log, onStat, getSettings
     if (!entry) return;
     active.delete(sessionId);
     entry.queue.length = 0;
+    entry.uploads.clear();
+    for (const id of entry.sockets) bridge.wsClose(`${sessionId}:${id}`, 1001, '');
+    entry.sockets.clear();
     entry.stopAnswer?.();
     entry.detachIce?.();
     try { entry.channel.close(); } catch { /* already closed */ }
@@ -221,6 +397,7 @@ export function startFetchHost({ db, machineId, bridge, log, onStat, getSettings
       stopped = true;
       stopAdded();
       stopRemoved();
+      stopWsEvents();
       for (const id of Array.from(active.keys())) teardown(id);
     },
   };
@@ -235,6 +412,11 @@ async function sweepStaleSessions(db, machineId) {
     if (now - (Number(child.val()?.createdAt) || 0) > SESSION_MAX_AGE_MS) dead.push(child.key);
   });
   await Promise.all(dead.map((id) => remove(ref(db, paths.session(machineId, id)))));
+}
+
+/** Electron wraps errors from main as "Error invoking remote method 'x': Error: …". */
+function cleanIpcError(err) {
+  return String(err?.message || err).replace(/^Error invoking remote method '[^']+': (\w*Error: )?/, '');
 }
 
 function short(url) {
