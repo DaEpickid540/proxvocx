@@ -121,6 +121,7 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
     };
     active.set(sessionId, entry);
     onSessionChange?.(summary());
+    entry.statsTimer = watchSendQuality(entry);
 
     // If the user stops sharing from the browser's own bar, drop the session.
     for (const track of stream.getTracks()) {
@@ -196,6 +197,47 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
       // A stream at Chromium's defaults is worse, but it is still a stream.
       log?.(`could not apply the encoder settings: ${err.message}`, 'warn');
     }
+  }
+
+  /**
+   * Logs why the encoder is sending fewer frames than it was asked for.
+   *
+   * The viewer only sees the result: the picture stutters. From that side a
+   * CPU that cannot keep up and a link that cannot carry the bits look the
+   * same, and they need opposite fixes. The first needs a lighter codec or a
+   * lower resolution; the second needs a lower bitrate or a wired connection.
+   * The sender's own stats say which one it is, so they go to the log. Only
+   * a change in the limitation is logged, not every tick, so a session that
+   * stays limited produces one line rather than a flood.
+   */
+  function watchSendQuality(entry) {
+    let lastReason = 'none';
+    return setInterval(async () => {
+      if (entry.pc.connectionState !== 'connected') return;
+      try {
+        const report = await entry.pc.getStats();
+        report.forEach((stat) => {
+          if (stat.type !== 'outbound-rtp' || stat.kind !== 'video') return;
+          const reason = stat.qualityLimitationReason || 'none';
+          if (reason === lastReason) return;
+          lastReason = reason;
+          const fps = Math.round(stat.framesPerSecond || 0);
+          const size = stat.frameWidth ? ` at ${stat.frameWidth}x${stat.frameHeight}` : '';
+          const codec = report.get(stat.codecId)?.mimeType?.replace('video/', '') || 'unknown codec';
+          if (reason === 'none') {
+            log?.(`stream recovered: ${fps}/${entry.frameRate} fps${size} (${codec})`, 'good');
+          } else {
+            const hint = {
+              cpu: 'the PC cannot encode fast enough. Try "Prefer smoothness (H.264)" or a lower resolution',
+              bandwidth: 'the network cannot carry it. Try a wired connection, 30 fps or a lower resolution',
+            }[reason] || 'check the connection';
+            log?.(`stream limited by ${reason}: ${fps}/${entry.frameRate} fps${size} (${codec}). ${hint}`, 'warn');
+          }
+        });
+      } catch {
+        /* getStats can throw while the connection is closing */
+      }
+    }, 3000);
   }
 
   /**
@@ -344,6 +386,7 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
     // chord, which is a genuinely alarming thing to walk back to.
     bridge.injectInput({ t: 'ku' }).catch(() => { /* no native input backend */ });
 
+    clearInterval(entry.statsTimer);
     entry.stopAnswer?.();
     entry.detachIce?.();
     try { entry.channel?.close(); } catch { /* already closed */ }

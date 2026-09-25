@@ -58,9 +58,14 @@ export const STREAM_MODES = {
  * avoid. H.264 is the other way round: hardware-encoded on essentially every
  * Windows GPU, so it is cheap and smooth, and merely soft rather than sharp.
  * Hence a choice, not a hardcoded winner.
+ *
+ * `auto` leads with H.264. At 1080p60, software VP9 in screen-content mode is
+ * the most common reason the host starts dropping frames, and a smooth, soft
+ * picture is a better default than a sharp one that jerks along. "Prefer
+ * sharpness" is still there for anyone reading text on a fast CPU.
  */
 export const CODEC_ORDERS = {
-  auto: ['video/VP9', 'video/H264', 'video/VP8'],
+  auto: ['video/H264', 'video/VP9', 'video/VP8'],
   sharp: ['video/VP9', 'video/VP8', 'video/H264'],
   smooth: ['video/H264', 'video/VP9', 'video/VP8'],
 };

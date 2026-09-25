@@ -72,6 +72,20 @@ const log = {
 process.on('uncaughtException', (err) => log.error('uncaught:', err?.stack || err));
 process.on('unhandledRejection', (err) => log.error('unhandled rejection:', err?.stack || err));
 
+/**
+ * The connector spends most of its life hidden in the tray, and Chromium
+ * treats a hidden or covered window as one nobody is watching: it lowers the
+ * renderer's priority and slows its timers. `backgroundThrottling: false` on
+ * the window only covers the timers. The screen share's capture and encoder
+ * run in that same renderer, so a demoted renderer shows up on the viewer as
+ * frames that arrive late and in bursts. These switches keep it at full speed
+ * whether the window is visible or not. They only take effect when set before
+ * `ready`.
+ */
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+
 let mainWindow = null;
 let tray = null;
 let staticServer = null;
