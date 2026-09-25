@@ -22,12 +22,30 @@ import {
 import { paths, isPresenceFresh, formatPairingCode } from './paths.js';
 import { claimPairingCode, unpairMachine, PairingError } from './pairing.js';
 import { createMiniBrowser, normaliseUrl } from './client-browser.js';
-import { createControlViewer } from './client-control.js';
+import { createBrowserTransport } from './fetch-tunnel.js';
+import { createControlViewer, SMOOTHING } from './client-control.js';
+import {
+  REMAP_TARGETS, REMAP_PRESETS, loadRemap, saveRemap, describeCode, targetLabel,
+} from './key-remap.js';
 import { createScriptedBrowserViewer } from './client-scripted-browser.js';
+import { createNativeBrowserViewer, resolveBrowseOrigin } from './client-native-browser.js';
+import { BROWSE_ORIGIN } from './firebase-config.js';
 import { $, el, openModal, toast, confirmModal, formatBytes, formatRelative, setBusy } from './ui.js';
 
 const SELECTED_KEY = 'proxvocx.selectedMachine';
 const LAST_MODE_KEY = 'proxvocx.mode';
+const ENGINE_KEY = 'proxvocx.engine';
+
+/**
+ * Browser mode's three engines. `native` runs the real page in this browser
+ * through Scramjet (full JavaScript, native quality); `safe` renders a
+ * script-free rewrite; `pctab` streams a real tab running on the PC.
+ */
+const ENGINES = {
+  native: 'Native (full sites)',
+  safe: 'Safe (no scripts)',
+  pctab: 'PC tab (streamed)',
+};
 
 const QUICK_LINKS = [
   ['Wikipedia', 'https://en.wikipedia.org'],
@@ -44,12 +62,16 @@ const state = {
   selected: null,
   mode: 'browser',
   browser: null,
+  browserTransport: null,
   scriptedBrowser: null,
   control: null,
   presenceWatchers: new Map(),
   pickerOpen: false,
-  scriptsActive: false,       // which Browser-mode engine is currently live
-  notifiedNoScripts: new Set(), // machineIds already told "JS isn't enabled" this load
+  nativeBrowser: null,
+  browseOrigin: null,
+  enginePref: 'native',       // what the engine picker is set to
+  activeEngine: null,         // which engine is actually live: native | safe | pctab
+  nativeUnavailable: new Map(), // machineId -> reason the native engine could not run there
 };
 
 /** isPresenceFresh() against Firebase's clock, not this device's own. */
@@ -57,7 +79,36 @@ const fresh = (presence) => isPresenceFresh(presence, serverNow());
 
 /** Whichever Browser-mode engine is currently backing the shared UI. */
 function activeBrowser() {
-  return state.scriptsActive ? state.scriptedBrowser : state.browser;
+  if (state.activeEngine === 'native') return state.nativeBrowser;
+  if (state.activeEngine === 'pctab') return state.scriptedBrowser;
+  return state.browser;
+}
+
+/**
+ * The engine that can actually run, given what was picked: the native engine
+ * needs a browse site and a connector new enough to serve it; the PC tab
+ * needs the PC to allow scripts. Anything unavailable falls back to `safe`,
+ * which works against any connector.
+ */
+function pickEngine() {
+  const entry = state.selected ? state.machines.get(state.selected) : null;
+  const scriptsOn = !!(fresh(entry?.presence) && entry.presence.capabilities?.scripts);
+  const pref = state.enginePref;
+  if (pref === 'native' && state.browseOrigin && !state.nativeUnavailable.has(state.selected)) return 'native';
+  if (pref === 'pctab' && scriptsOn) return 'pctab';
+  return 'safe';
+}
+
+function renderEnginePicker() {
+  const picker = $('#browserEngine');
+  if (!picker) return;
+  const entry = state.selected ? state.machines.get(state.selected) : null;
+  const scriptsOn = !!(fresh(entry?.presence) && entry.presence.capabilities?.scripts);
+  for (const option of picker.options) {
+    if (option.value === 'native') option.disabled = !state.browseOrigin;
+    if (option.value === 'pctab') option.disabled = !scriptsOn;
+  }
+  picker.value = state.activeEngine || state.enginePref;
 }
 
 /**
@@ -70,24 +121,63 @@ function activeBrowser() {
  */
 function syncBrowserEngine() {
   const entry = state.selected ? state.machines.get(state.selected) : null;
-  const scriptsOn = !!(fresh(entry?.presence) && entry.presence.capabilities?.scripts);
+  const engine = pickEngine();
 
-  if (scriptsOn === state.scriptsActive) return;
-
-  // Swapping engines mid-session tears down whichever one was live — the two
-  // never run at once, and the one going idle has no business holding a
-  // WebRTC session or a proxy fetch open in the background.
-  state.browser?.reset();
-  state.scriptedBrowser?.reset();
-
-  state.scriptsActive = scriptsOn;
-  $('#browserFrame').hidden = scriptsOn;
-  $('#browserVideo').hidden = !scriptsOn;
-
-  if (!scriptsOn && entry && state.mode === 'browser' && !state.notifiedNoScripts.has(state.selected)) {
-    state.notifiedNoScripts.add(state.selected);
-    noScriptsModal(entry.name);
+  // The fast lane (fetch-tunnel.js) carries both the native and the safe
+  // engine, and is opened as soon as either is on screen so the first page
+  // is fast too. The PC-tab engine carries its own connection.
+  if (state.mode === 'browser' && engine !== 'pctab' && fresh(entry?.presence)) {
+    state.browserTransport?.warm(state.selected);
+  } else if (engine === 'pctab') {
+    state.browserTransport?.close();
   }
+
+  if (engine !== state.activeEngine) {
+    // Swapping engines tears down whichever one was live — they never run
+    // at once, and the one going idle has no business holding a session, a
+    // socket or a proxy fetch open in the background.
+    state.browser?.reset();
+    state.scriptedBrowser?.reset();
+    state.nativeBrowser?.reset();
+
+    state.activeEngine = engine;
+    $('#browserFrame').hidden = engine !== 'safe';
+    $('#browserVideo').hidden = engine !== 'pctab';
+  }
+  renderEnginePicker();
+}
+
+/** The engine picker changed: remember it, switch, and re-open the page there. */
+function chooseEngine(engine) {
+  const entry = state.selected ? state.machines.get(state.selected) : null;
+  if (engine === 'pctab' && !(fresh(entry?.presence) && entry.presence.capabilities?.scripts)) {
+    renderEnginePicker();
+    noScriptsModal(entry?.name);
+    return;
+  }
+  const current = $('#urlInput').value;
+  state.enginePref = engine;
+  try { localStorage.setItem(ENGINE_KEY, engine); } catch { /* private mode */ }
+  if (engine === 'native') state.nativeUnavailable.delete(state.selected);
+  const before = state.activeEngine;
+  syncBrowserEngine();
+  if (current && state.activeEngine !== before) activeBrowser().go(current);
+}
+
+/**
+ * The native engine could not run against this PC. Say why once, fall back
+ * to the safe engine for this PC, and open the page there instead.
+ */
+function nativeUnavailable(reason, url) {
+  const why = {
+    unreachable: 'A direct connection to the PC could not be opened (some networks need a TURN relay). Using the safe engine instead.',
+    outdated: 'The connector on this PC is too old for the native engine. Update the desktop app on the PC — using the safe engine until then.',
+    shell: 'The browse site for the native engine is not reachable. Using the safe engine instead.',
+  }[reason] || 'The native engine is not available right now. Using the safe engine instead.';
+  if (!state.nativeUnavailable.has(state.selected)) toast(why, 'danger', 9000);
+  state.nativeUnavailable.set(state.selected, reason);
+  syncBrowserEngine();
+  if (url) activeBrowser().go(url);
 }
 
 function noScriptsModal(machineName) {
@@ -95,12 +185,11 @@ function noScriptsModal(machineName) {
     el('div', {},
       el('h2', { class: 'modal-title' }, 'JavaScript isn’t enabled'),
       el('p', { class: 'modal-sub' },
-        `${machineName || 'This PC'} is running Browser mode without JavaScript. Pages render as ` +
-        'plain, static markup — fine for articles and simple sites, but games, most modern web ' +
-        'apps, and anything that needs a live connection will not work.'),
+        `${machineName || 'This PC'} does not allow the PC-tab engine, which runs a real browser ` +
+        'tab on the PC and streams it here.'),
       el('p', { class: 'hint', style: { marginBottom: '16px' } },
-        'Turn on “Allow JavaScript in Browser mode” in the connector’s settings on the PC ' +
-        'for a real, fully scripted browser tab instead — full JavaScript, full WebSockets.'),
+        'Turn on “Allow JavaScript in Browser mode” in the connector’s settings on the PC to use it. ' +
+        'The native engine needs no setting on the PC and runs full sites too.'),
       el('div', { class: 'modal-footer' },
         el('button', { class: 'btn btn--primary', onClick: () => close() }, 'Got it')),
     ),
@@ -170,6 +259,7 @@ function selectMachine(machineId) {
 
   state.browser?.reset();
   state.scriptedBrowser?.reset();
+  state.nativeBrowser?.reset();
   state.control?.reset();
   renderMachinePill();
   syncBrowserEngine();
@@ -379,6 +469,26 @@ let lastControlState = {};
 const FPS_STOPS = [15, 30, 60, 90, 120, 144];
 
 /**
+ * Heights the viewer can ask the PC to send at. The PC never upscales, so a
+ * choice above what it captures simply sends what it captures.
+ */
+const RESOLUTIONS = [
+  [0, 'Full — whatever the PC captures'],
+  [1080, '1080p'],
+  [900, '900p'],
+  [720, '720p — easier on a Chromebook or a weak link'],
+  [540, '540p'],
+];
+
+/** What each `limit` reason means, and what to try, for the status bar. */
+const LIMITS = {
+  bandwidth: ['limited by network', 'The link cannot carry this picture. Try Smoothing, a lower resolution or 30 fps, or a wired connection on the PC.'],
+  cpu: ['limited by PC CPU', 'The PC cannot encode fast enough. Try a lower resolution or frame rate, or set the PC\'s codec to "Prefer smoothness (H.264)".'],
+  decode: ['limited by this device', 'This device is dropping frames it received — it cannot decode or draw them in time. Try 720p or a lower frame rate.'],
+  other: ['limited', 'The PC is sending less than it was asked for.'],
+};
+
+/**
  * The Stream settings modal: monitor, frame rate, and what the picture is
  * tuned for. These were three dropdowns crowded into the toolbar, where two of
  * the three were dead weight against a browser-hosted connector with nothing
@@ -393,7 +503,9 @@ const FPS_STOPS = [15, 30, 60, 90, 120, 144];
  * touches the encoder on the existing track, so it works either way.
  */
 function openStreamModal() {
-  const { sources = [], activeSourceId, frameRate, streamMode, connected } = lastControlState;
+  const {
+    sources = [], activeSourceId, frameRate, streamMode, connected, resolution, smoothing,
+  } = lastControlState;
   if (!connected) return null;
   const canRecapture = sources.length > 0;
 
@@ -449,6 +561,18 @@ function openStreamModal() {
     if (streamMode) mode.value = streamMode;
     mode.addEventListener('change', (event) => state.control.setStreamMode(event.target.value));
 
+    /* ── resolution ── */
+    const res = el('select', { class: 'select-input' },
+      ...RESOLUTIONS.map(([value, label]) => el('option', { value: String(value) }, label)));
+    res.value = String(resolution || 0);
+    res.addEventListener('change', (event) => state.control.setResolution(Number(event.target.value)));
+
+    /* ── smoothing ── */
+    const smooth = el('select', { class: 'select-input' },
+      ...Object.entries(SMOOTHING).map(([value, { label }]) => el('option', { value }, label)));
+    if (smoothing) smooth.value = smoothing;
+    smooth.addEventListener('change', (event) => state.control.setSmoothing(event.target.value));
+
     return el('div', {},
       el('h2', { class: 'modal-title' }, 'Stream'),
       el('p', { class: 'modal-sub' }, 'Applies to this session, straight away.'),
@@ -471,12 +595,145 @@ function openStreamModal() {
         el('span', { class: 'field-label' }, 'Tuned for'),
         mode,
       ),
+      el('div', { class: 'field' },
+        el('span', { class: 'field-label' }, 'Resolution'),
+        res,
+      ),
+      el('div', { class: 'field' },
+        el('span', { class: 'field-label' }, 'Smoothing'),
+        smooth,
+      ),
+      el('p', { class: 'field-note' },
+        'Choppy but not blurry is usually network jitter — turn Smoothing up. '
+        + 'The status bar says when the PC, the network or this device is the bottleneck.'),
 
       el('div', { class: 'modal-footer' },
         el('button', { class: 'btn btn--primary', onClick: () => close(true) }, 'Done'),
       ),
     );
   }, { width: '420px' });
+}
+
+/**
+ * The key remap editor. Rules live in this browser (see key-remap.js) and
+ * apply to the live session the moment they are saved.
+ */
+function openRemapModal() {
+  let map = loadRemap();
+  let stopListening = null;
+
+  return openModal((close) => {
+    const list = el('div', { class: 'remap-list' });
+    const commit = () => {
+      saveRemap(map);
+      state.control?.reloadKeyRemap();
+      renderList();
+    };
+
+    function renderList() {
+      const rules = Object.entries(map);
+      if (!rules.length) {
+        list.replaceChildren(el('p', { class: 'hint' }, 'No keys are remapped.'));
+        return;
+      }
+      list.replaceChildren(...rules.map(([from, to]) =>
+        el('div', { class: 'remap-row' },
+          el('span', { class: 'remap-key' }, describeCode(from)),
+          el('span', { class: 'remap-arrow' }, '→'),
+          el('span', { class: 'remap-key' }, targetLabel(to)),
+          el('button', {
+            class: 'btn btn--ghost btn--sm',
+            onClick: () => {
+              delete map[from];
+              commit();
+            },
+          }, 'Remove'),
+        )));
+    }
+
+    /* ── new rule ── */
+    let fromCode = null;
+    const fromBtn = el('button', { class: 'btn btn--ghost btn--sm remap-capture' }, 'Press to pick a key');
+    fromBtn.addEventListener('click', () => {
+      if (stopListening) return;
+      fromBtn.textContent = 'Press the key to remap…';
+      fromBtn.classList.add('active');
+      const onKey = (event) => {
+        // Capture phase on the window, and stopped here, so neither the
+        // modal (which closes on Escape) nor the page sees the key.
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        stopListening();
+        if (event.key === 'Escape' || !event.code) {
+          fromBtn.textContent = fromCode ? describeCode(fromCode) : 'Press to pick a key';
+          return;
+        }
+        fromCode = event.code;
+        fromBtn.textContent = describeCode(fromCode);
+      };
+      window.addEventListener('keydown', onKey, true);
+      stopListening = () => {
+        window.removeEventListener('keydown', onKey, true);
+        fromBtn.classList.remove('active');
+        stopListening = null;
+      };
+    });
+
+    const toSelect = el('select', { class: 'select-input' },
+      ...REMAP_TARGETS.map(([group, keys]) => el('optgroup', { label: group },
+        ...keys.map(([code, , label]) => el('option', { value: code }, label)))));
+
+    const addBtn = el('button', {
+      class: 'btn btn--primary btn--sm',
+      onClick: () => {
+        if (!fromCode) {
+          toast('Pick the key to remap first', 'danger');
+          return;
+        }
+        map[fromCode] = toSelect.value;
+        fromCode = null;
+        fromBtn.textContent = 'Press to pick a key';
+        commit();
+      },
+    }, 'Add');
+
+    renderList();
+
+    return el('div', {},
+      el('h2', { class: 'modal-title' }, 'Remap keys'),
+      el('p', { class: 'modal-sub' },
+        'Turn a key on this keyboard into a different key on the PC. Saved on this device only.'),
+
+      el('div', { class: 'section-label' }, 'Quick add'),
+      el('div', { class: 'remap-presets' },
+        ...REMAP_PRESETS.map((preset) => el('button', {
+          class: 'btn btn--ghost btn--sm',
+          onClick: () => {
+            map[preset.from] = preset.to;
+            commit();
+          },
+        }, preset.label))),
+
+      el('div', { class: 'section-label', style: { marginTop: '16px' } }, 'Rules'),
+      list,
+
+      el('div', { class: 'section-label', style: { marginTop: '16px' } }, 'New rule'),
+      el('div', { class: 'remap-new' }, fromBtn, el('span', { class: 'remap-arrow' }, '→'), toSelect, addBtn),
+
+      el('p', { class: 'field-note' },
+        'On a Chromebook, ChromeOS grabs the Search key for its launcher before a web page sees it. '
+        + 'Use Fullscreen while controlling the PC: the page can then ask the browser to hand it '
+        + 'those system keys. In a normal window the launcher may still open. '
+        + 'Esc always releases the keyboard, so it cannot be remapped.'),
+
+      el('div', { class: 'modal-footer' },
+        el('button', { class: 'btn btn--primary', onClick: () => close(true) }, 'Done'),
+      ),
+    );
+  }, { width: '480px' }).finally(() => {
+    // The modal can close while a key capture is still armed.
+    stopListening?.();
+  });
 }
 
 /**
@@ -615,9 +872,12 @@ async function main() {
   $('#accountBtn').textContent = (user.email || user.displayName || '?').slice(0, 1);
 
   /* mini browser */
+  state.browserTransport = createBrowserTransport({ db: state.db, uid: state.uid });
   state.browser = createMiniBrowser({
     db: state.db,
     getMachineId: () => state.selected,
+    request: (machineId, spec, options) => state.browserTransport.request(machineId, spec, options),
+    isFast: (machineId) => state.browserTransport.isFast(machineId),
     elements: {
       frame: $('#browserFrame'),
       stage: $('#browserStage'),
@@ -636,6 +896,38 @@ async function main() {
       $('#statusTime').textContent = ms != null ? `${ms} ms` : '';
     },
   });
+
+  /* native engine — Scramjet on the separate browse origin, fed by the fast lane */
+  state.browseOrigin = resolveBrowseOrigin(BROWSE_ORIGIN);
+  try {
+    const saved = localStorage.getItem(ENGINE_KEY);
+    if (ENGINES[saved]) state.enginePref = saved;
+  } catch { /* private mode */ }
+  state.nativeBrowser = createNativeBrowserViewer({
+    getMachineId: () => state.selected,
+    transport: state.browserTransport,
+    browseOrigin: state.browseOrigin,
+    elements: {
+      stage: $('#browserStage'),
+      overlay: $('#stageOverlay'),
+      overlayTitle: $('#stageTitle'),
+      overlayMessage: $('#stageMsg'),
+      urlInput: $('#urlInput'),
+      urlLock: $('#urlLock'),
+      loadBar: $('#loadBar'),
+      backBtn: $('#navBack'),
+      forwardBtn: $('#navForward'),
+    },
+    onStatus: ({ text }) => {
+      $('#statusText').textContent = text;
+      $('#statusBytes').textContent = '';
+      $('#statusTime').textContent = '';
+    },
+    onUnavailable: nativeUnavailable,
+  });
+  $('#browserEngine')?.replaceChildren(...Object.entries(ENGINES).map(([value, label]) =>
+    el('option', { value }, label)));
+  $('#browserEngine')?.addEventListener('change', (event) => chooseEngine(event.target.value));
 
   /* scripted browser viewer — the other Browser-mode engine, sharing the
      same URL bar / back / forward / stage / overlay elements */
@@ -682,6 +974,7 @@ async function main() {
     onState: ({
       connected, status, rtt, fps, canInput,
       sources, activeSourceId, frameRate, streamMode, mouseLocked,
+      resolution, smoothing, limit,
     }) => {
       $('#controlDisconnect').disabled = !connected;
       $('#controlCtrlAltDel').disabled = !connected || !canInput;
@@ -705,7 +998,9 @@ async function main() {
       }
       // Frame rate, stream mode and monitor are capture settings, not input,
       // so they stay available on a view-only session.
-      lastControlState = { connected, sources, activeSourceId, frameRate, streamMode };
+      lastControlState = {
+        connected, sources, activeSourceId, frameRate, streamMode, resolution, smoothing,
+      };
       const streamBtn = $('#controlStreamBtn');
       if (streamBtn) streamBtn.disabled = !connected;
 
@@ -715,12 +1010,21 @@ async function main() {
         $('#latencyText').textContent = status === 'connecting' ? 'connecting…' : 'not connected';
         return;
       }
-      dot.classList.add(rtt == null ? '' : rtt < 60 ? 'good' : rtt < 150 ? 'fair' : 'poor');
       const bits = [];
+      // `classList.add('')` throws, so an unknown RTT must add nothing at all
+      // rather than an empty class — the throw used to abort this whole update.
+      let health = rtt == null ? null : rtt < 60 ? 'good' : rtt < 150 ? 'fair' : 'poor';
       if (rtt != null) bits.push(`${rtt} ms`);
       if (fps) bits.push(`${fps} fps`);
       if (!canInput) bits.push('view-only');
+      const [limitLabel, limitHint] = LIMITS[limit] || [];
+      if (limitLabel) {
+        bits.push(limitLabel);
+        if (health !== 'poor') health = 'fair';
+      }
+      if (health) dot.classList.add(health);
       $('#latencyText').textContent = bits.join(' · ') || 'connected';
+      $('#controlStats').title = limitHint || '';
     },
   });
 
@@ -763,6 +1067,7 @@ async function main() {
   });
   buildKeyPad();
   $('#controlKeysBtn').addEventListener('click', () => toggleKeyPad());
+  $('#controlRemapBtn')?.addEventListener('click', () => openRemapModal());
   $('#controlFullscreen').addEventListener('click', () => {
     const stage = $('#controlStage');
     if (document.fullscreenElement) document.exitFullscreen();
@@ -779,7 +1084,10 @@ async function main() {
   watchMachines();
   const initial = await get(ref(state.db, paths.userMachines(state.uid))).catch(() => null);
   initial?.forEach((child) => {
-    state.machines.set(child.key, { ...child.val(), id: child.key });
+    // Merged, not replaced: the live watch above may already have filled in
+    // this PC's presence, and dropping it made an online PC read as offline —
+    // and raised the "went offline" picker at boot — until its next heartbeat.
+    state.machines.set(child.key, { ...state.machines.get(child.key), ...child.val(), id: child.key });
     watchPresence(child.key);
   });
 

@@ -36,6 +36,20 @@ export function createScriptedBrowserViewer({ db, uid, getMachineId, elements, o
   let detachIce = null;
   let screen = { width: 1280, height: 800 };
   let lastMoveSent = 0;
+  // The newest move that landed inside the send interval. Dropping it instead
+  // left the PC's cursor short of where the pointer came to rest, which in a
+  // browser means the hover you were aiming for never lights up.
+  let pendingPoint = null;
+  let moveTimer = null;
+
+  function flushMove() {
+    clearTimeout(moveTimer);
+    moveTimer = null;
+    if (!pendingPoint) return;
+    lastMoveSent = performance.now();
+    send(pointer('move', pendingPoint.x, pendingPoint.y));
+    pendingPoint = null;
+  }
   let navStateKnown = false;
 
   /* ── navigation (the public surface client.js drives) ─────────── */
@@ -229,22 +243,24 @@ export function createScriptedBrowserViewer({ db, uid, getMachineId, elements, o
     video.addEventListener('pointermove', (event) => {
       const point = toScreenPoint(event);
       if (!point.inside) return;
-      const now = performance.now();
-      if (now - lastMoveSent < 8) return;
-      lastMoveSent = now;
-      send(pointer('move', point.x, point.y));
+      pendingPoint = point;
+      const wait = 8 - (performance.now() - lastMoveSent);
+      if (wait <= 0) flushMove();
+      else if (!moveTimer) moveTimer = setTimeout(flushMove, wait);
     });
     video.addEventListener('pointerdown', (event) => {
       const point = toScreenPoint(event);
       if (!point.inside) return;
       event.preventDefault();
       video.focus();
+      flushMove();
       send(pointer('down', point.x, point.y, buttonFromEvent(event)));
     });
     video.addEventListener('pointerup', (event) => {
       const point = toScreenPoint(event);
       if (!point.inside) return;
       event.preventDefault();
+      flushMove();
       send(pointer('up', point.x, point.y, buttonFromEvent(event)));
     });
     video.addEventListener('dblclick', (event) => {

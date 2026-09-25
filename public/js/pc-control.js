@@ -9,9 +9,11 @@
 import { ref, set, update, remove, onValue, onChildAdded, onChildRemoved, get } from './firebase.js';
 import { paths } from './paths.js';
 import { iceServers, attachIce, SESSION_MAX_AGE_MS } from './signaling.js';
-import { INPUT_CHANNEL, isValidEvent, configState } from './input-protocol.js';
 import {
-  CODEC_ORDERS, STREAM_MODES, bitrateFor, tuneSender, preferCodecs, applyBitrateHints,
+  INPUT_CHANNEL, FAST_INPUT_CHANNEL, isValidEvent, configState, qualityState,
+} from './input-protocol.js';
+import {
+  CODEC_ORDERS, STREAM_MODES, bitrateFor, tuneSender, preferCodecs, applyBitrateHints, downscaleFor,
 } from './video-tuning.js';
 
 export function startControlHost({ db, machineId, bridge, log, onStat, getSettings, onSessionChange }) {
@@ -93,7 +95,13 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
     // The host opens the channel: it makes the offer, so this saves a
     // renegotiation round trip.
     const channel = pc.createDataChannel(INPUT_CHANNEL, { ordered: true });
-    channel.addEventListener('message', (event) => onInputMessage(sessionId, event.data));
+    channel.addEventListener('message', (event) => onInputMessage(sessionId, event.data, false));
+    // Cursor moves only — unordered and never retransmitted, so one lost
+    // packet cannot hold every later position hostage. See FAST_INPUT_CHANNEL.
+    // A viewer that predates it simply never opens it and keeps sending moves
+    // on the reliable channel, which still works.
+    const fastChannel = pc.createDataChannel(FAST_INPUT_CHANNEL, { ordered: false, maxRetransmits: 0 });
+    fastChannel.addEventListener('message', (event) => onInputMessage(sessionId, event.data, true));
 
     const detachIce = attachIce(db, machineId, sessionId, pc, 'host');
 
@@ -108,7 +116,7 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
     });
 
     const entry = {
-      pc, stream, channel, detachIce,
+      pc, stream, channel, fastChannel, detachIce,
       clientUid: session.clientUid,
       startedAt: Date.now(),
       screen: trackGeometry(stream),
@@ -118,6 +126,11 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
       frameRate,
       maxHeight: settings.maxHeight ?? 1080,
       streamMode,
+      // The height the viewer asked to receive; 0 means "whatever is captured".
+      resolution: 0,
+      // Highest pointer sequence number applied so far, so a move that arrives
+      // late over the unordered channel cannot drag the cursor backwards.
+      pointerSeq: -1,
     };
     active.set(sessionId, entry);
     onSessionChange?.(summary());
@@ -185,13 +198,21 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
    * ceiling itself depends on the resolution and frame rate that just changed.
    */
   async function applyVideoTuning(entry) {
-    entry.maxBitrate = bitrateFor({ ...entry.screen, frameRate: entry.frameRate });
+    const scaleDownBy = downscaleFor(entry.screen.height, entry.resolution);
+    // Sized to what is actually encoded — a 720p picture of a 1080p capture
+    // needs well under half the bits.
+    entry.maxBitrate = bitrateFor({
+      width: entry.screen.width / scaleDownBy,
+      height: entry.screen.height / scaleDownBy,
+      frameRate: entry.frameRate,
+    });
     const sender = entry.pc.getSenders().find((s) => s.track?.kind === 'video');
     try {
       await tuneSender(sender, {
         mode: entry.streamMode,
         frameRate: entry.frameRate,
         maxBitrate: entry.maxBitrate,
+        scaleDownBy,
       });
     } catch (err) {
       // A stream at Chromium's defaults is worse, but it is still a stream.
@@ -222,6 +243,9 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
           if (reason === lastReason) return;
           lastReason = reason;
           const fps = Math.round(stat.framesPerSecond || 0);
+          sendToViewer(entry, qualityState({
+            reason, fps, width: stat.frameWidth, height: stat.frameHeight,
+          }));
           const size = stat.frameWidth ? ` at ${stat.frameWidth}x${stat.frameHeight}` : '';
           const codec = report.get(stat.codecId)?.mimeType?.replace('video/', '') || 'unknown codec';
           if (reason === 'none') {
@@ -249,14 +273,19 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
    * from success and the only record is a log line on this machine.
    */
   function reportConfig(entry, error = null) {
+    sendToViewer(entry, configState({
+      sourceId: entry.sourceId,
+      frameRate: entry.frameRate,
+      streamMode: entry.streamMode,
+      resolution: entry.resolution,
+      error,
+    }));
+  }
+
+  function sendToViewer(entry, message) {
     if (entry.channel?.readyState !== 'open') return;
     try {
-      entry.channel.send(JSON.stringify(configState({
-        sourceId: entry.sourceId,
-        frameRate: entry.frameRate,
-        streamMode: entry.streamMode,
-        error,
-      })));
+      entry.channel.send(JSON.stringify(message));
     } catch {
       /* The channel went away mid-send; the session is ending anyway. */
     }
@@ -264,7 +293,7 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
 
   /* ── input replay ──────────────────────────────────────────── */
 
-  async function onInputMessage(sessionId, raw) {
+  async function onInputMessage(sessionId, raw, fromFastChannel) {
     const entry = active.get(sessionId);
     if (!entry) return;
 
@@ -276,11 +305,29 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
     }
     if (!isValidEvent(event)) return;
 
+    // The fast channel is for cursor moves and nothing else — anything that
+    // must not be lost has no business arriving on a channel that may lose it.
+    if (fromFastChannel && !(event.t === 'p' && event.a === 'move')) return;
+    if (event.t === 'p' && Number.isFinite(event.s)) {
+      // A move that was overtaken in flight is stale: something newer has
+      // already put the cursor somewhere else. Presses and releases are
+      // always applied (they carry their own position), but still advance the
+      // sequence so an older move cannot land on top of them mid-drag.
+      if (event.a === 'move' && event.s <= entry.pointerSeq) return;
+      entry.pointerSeq = Math.max(entry.pointerSeq, event.s);
+    }
+
     // These three reconfigure how the picture is captured and coded rather
     // than the OS input state, so they run regardless of the allowInput
     // setting — they are not input.
     if (event.t === 'fps') return recapture(sessionId, entry, { frameRate: event.v });
     if (event.t === 'disp') return recapture(sessionId, entry, { sourceId: event.id });
+    if (event.t === 'res') {
+      entry.resolution = event.v;
+      await applyVideoTuning(entry);
+      log?.(event.v ? `sending at up to ${event.v}p` : 'sending at the captured resolution', 'good');
+      return reportConfig(entry);
+    }
     if (event.t === 'sm') {
       if (!STREAM_MODES[event.v]) return reportConfig(entry, `unknown stream mode "${event.v}"`);
       entry.streamMode = event.v;
@@ -390,6 +437,7 @@ export function startControlHost({ db, machineId, bridge, log, onStat, getSettin
     entry.stopAnswer?.();
     entry.detachIce?.();
     try { entry.channel?.close(); } catch { /* already closed */ }
+    try { entry.fastChannel?.close(); } catch { /* already closed */ }
     try { entry.pc.close(); } catch { /* already closed */ }
     for (const track of entry.stream?.getTracks() || []) track.stop();
 

@@ -11,6 +11,14 @@
  * the moment that origin changes, and the connector silently bounces back to
  * the portal instead of starting. A compiled-in default has no such problem.
  */
+/**
+ * Where Browser mode's native engine (Scramjet) is hosted: a *second*
+ * Firebase Hosting site, deliberately not this one — see README, "The native
+ * engine". Leave it null to use the convention the README sets up, which is
+ * this site's name plus "-browse" (proxvocx.web.app → proxvocx-browse.web.app).
+ */
+export const BROWSE_ORIGIN = null;
+
 export const FIREBASE_CONFIG = {
   apiKey: 'AIzaSyAtRLYEN30W1eL4EwiRGN4x_oOzI-HlJZQ',
   authDomain: 'personal-suite-ca587.firebaseapp.com',

@@ -7,6 +7,9 @@
       "hosting": {
         "proxvocx": [
           "proxvocx"
+        ],
+        "browse": [
+          "proxvocx-browse"
         ]
       }
     }

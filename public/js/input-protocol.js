@@ -12,15 +12,46 @@
 
 export const INPUT_CHANNEL = 'input';
 
-/** Pointer: move, press, release, click, double click. */
-export const pointer = (action, x, y, button = 'left', rel = false) =>
-  ({ t: 'p', a: action, x: clamp01(x), y: clamp01(y), b: button, ...(rel ? { rel: true } : {}) });
+/**
+ * A second channel, unordered and never retransmitted, that carries nothing
+ * but absolute pointer moves.
+ *
+ * On the reliable, ordered channel one lost packet holds up everything behind
+ * it until the retransmit lands — a round trip or more on wifi — and then the
+ * whole backlog is replayed at once. For a click that is exactly right. For a
+ * cursor position it is the definition of lag: every move after the loss
+ * waits for a move that is already out of date. Here a lost move simply never
+ * arrives, and the next one (a few milliseconds later) supersedes it anyway.
+ *
+ * Moves carry a sequence number (`s`) shared with the reliable channel's
+ * pointer events, so the host can throw away one that arrives after something
+ * newer — unordered delivery means that does happen.
+ */
+export const FAST_INPUT_CHANNEL = 'input-fast';
+
+/** Pointer: move, press, release, click, double click. `seq` orders pointer
+ *  events across the two channels; see FAST_INPUT_CHANNEL. */
+export const pointer = (action, x, y, button = 'left', rel = false, seq) => ({
+  t: 'p', a: action, x: clamp01(x), y: clamp01(y), b: button,
+  ...(rel ? { rel: true } : {}),
+  ...(Number.isFinite(seq) ? { s: seq } : {}),
+});
 
 /** Relative pointer motion under Pointer Lock — for FPS-style games. */
 export const pointerRel = (dx, dy) => ({ t: 'pr', dx: Math.round(dx), dy: Math.round(dy) });
 
 /** Ask the host to change its live capture frame rate, without reconnecting. */
 export const setFps = (value) => ({ t: 'fps', v: value });
+
+/**
+ * Ask the host to send a smaller picture — `v` is the target height in pixels,
+ * or 0 for whatever it captures. Applied as an encoder-side downscale, so it
+ * takes effect instantly and needs no re-capture (and therefore works on a
+ * browser-hosted connector too). Fewer pixels is less for the PC to encode,
+ * less for the link to carry, and less for a modest Chromebook to decode —
+ * any one of which can be the reason a stream stutters.
+ */
+export const setResolution = (height) => ({ t: 'res', v: Math.round(Number(height) || 0) });
 
 /** Ask the host to switch which display it is capturing, without reconnecting. */
 export const switchDisplay = (id) => ({ t: 'disp', id: String(id) });
@@ -109,12 +140,30 @@ export const navReload = () => ({ t: 'n', a: 'reload' });
  * guards the path from a viewer into the OS, and nothing a viewer sends should
  * ever be accepted as one of these.
  */
-export const configState = ({ sourceId, frameRate, streamMode, error } = {}) => ({
+export const configState = ({ sourceId, frameRate, streamMode, resolution, error } = {}) => ({
   t: 'cfg',
   ...(sourceId ? { id: String(sourceId) } : {}),
   ...(Number.isFinite(frameRate) ? { fps: frameRate } : {}),
   ...(streamMode ? { sm: String(streamMode) } : {}),
+  ...(Number.isFinite(resolution) ? { res: resolution } : {}),
   ...(error ? { err: String(error).slice(0, 200) } : {}),
+});
+
+/**
+ * Host → client only: why the encoder is sending less than it was asked for
+ * ('none', 'cpu', 'bandwidth', 'other'), sent whenever that changes.
+ *
+ * From the viewer's side a PC that cannot encode fast enough and a link that
+ * cannot carry the bits look identical — the picture stutters — but they need
+ * opposite fixes. The PC already knew which it was and wrote it to its own
+ * log, on the other machine, where nobody watching the stutter would see it.
+ * Like `cfg`, deliberately absent from `isValidEvent`.
+ */
+export const qualityState = ({ reason, fps, width, height }) => ({
+  t: 'q',
+  r: String(reason || 'none'),
+  ...(Number.isFinite(fps) ? { fps } : {}),
+  ...(width ? { w: width, h: height } : {}),
 });
 
 export const navState = ({ url, title, canGoBack, canGoForward, loading }) =>
@@ -150,6 +199,8 @@ export function isValidEvent(event) {
       return Number.isFinite(event.dx) && Number.isFinite(event.dy);
     case 'fps':
       return Number.isFinite(event.v) && event.v >= 1 && event.v <= 240;
+    case 'res':
+      return Number.isInteger(event.v) && (event.v === 0 || (event.v >= 144 && event.v <= 4320));
     case 'disp':
       return typeof event.id === 'string' && event.id.length > 0 && event.id.length <= 256;
     case 'ar':

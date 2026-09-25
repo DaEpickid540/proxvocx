@@ -79,11 +79,19 @@ off a screen and typed on a phone cannot be misread.
 | `public/js/pc-control.js` | Connector: serves screen + replays input |
 | `public/js/pc-scripted-browser.js` | Connector: serves a real, JS-enabled browser tab |
 | `public/js/proxy-client.js` | Client: enqueue a request, await the response |
+| `public/js/fetch-tunnel.js` | Client: Browser mode's direct fast lane, with fallback to the queue |
+| `public/js/lane-frames.js` | Binary framing shared by both ends of the fast lane |
+| `public/js/client-native-browser.js` | Client: the native (Scramjet) engine — relays the browse shell to the fast lane |
+| `public-browse/` | The browse site: Scramjet's shell, service worker, and vendored Scramjet + bare-mux |
+| `desktop/bridge/raw-fetch.js` | Browser-exact requests for the native engine |
+| `desktop/bridge/ws-relay.js` | WebSockets opened by the PC for the native engine |
+| `public/js/pc-fetch.js` | Connector: serves the fast lane over a WebRTC data channel |
 | `public/js/client-browser.js` | The script-free mini browser and its HTML rewriter |
 | `public/js/client-control.js` | The remote desktop viewer |
 | `public/js/client-scripted-browser.js` | The viewer for a real, scripted browser tab |
 | `public/js/signaling.js` | WebRTC handshake over RTDB |
 | `public/js/input-protocol.js` | The input (and nav command) wire format |
+| `public/js/key-remap.js` | Viewer-side key remapping rules (per device) |
 | `desktop/main.js` | Electron main: IPC, tray, run-at-login |
 | `desktop/preload.cjs` | The only Electron surface the page can see |
 | `desktop/bridge/fetcher.js` | The proxy fetch, with redirect re-validation |
@@ -102,20 +110,30 @@ machines/{machineId}
                                                added (never replaced) by the PC at pairing
   meta        { name, platform, appVersion, createdAt }
   presence    { online, lastSeen, capabilities: { proxy, control, input, scripts } }
-  requests/{id}    owner writes, PC drains        ← Browser mode (script-free)
-  responses/{id}   PC writes, owner reads+deletes ← Browser mode (script-free)
+  requests/{id}    owner writes, PC drains        ← Browser mode (script-free),
+  responses/{id}   PC writes, owner reads+deletes ←   only until the fast lane opens
   sessions/{id}    { mode, url?, offer, answer, ice } ← handshake only, for
-                                                        both PC Control and
+                                                        PC Control ('control'),
                                                         scripted Browser mode
+                                                        ('scripted') and the
+                                                        Browser-mode fast lane
+                                                        ('fetch')
 
 users/{uid}/machines/{machineId}   { name, pairedAt }
 
 pairing/{code}   { machineId, machineName, deviceUid, createdAt, expiresAt, claimedBy }
 ```
 
-Only the WebRTC *handshake* touches the database. Screen frames and input
-events travel peer-to-peer, so a control session costs a few kilobytes of
-Firebase quota regardless of how long you stay connected.
+Only the WebRTC *handshake* touches the database. Screen frames, input
+events and — once its fast lane is open — script-free Browser mode's pages
+all travel peer-to-peer, so a session costs a few kilobytes of Firebase quota
+regardless of how long you stay connected. The `requests`/`responses` queue
+is the fallback for the first moments of browsing and for networks where a
+direct connection cannot be made.
+
+> **Deploy the rules again** after updating (`firebase deploy --only database`):
+> the fast lane uses a new session mode, `'fetch'`, which older rules reject.
+> Browsing still works without it, just only over the slower database queue.
 
 `pairing` itself is not readable — only `pairing/{code}` is, so codes cannot be
 listed or enumerated. Knowing the code is the secret.
@@ -196,9 +214,9 @@ Environment variables read by the desktop app:
 | --- | --- | --- |
 | `PROXVOCX_SITE_URL` | *(packaged copy)* | Load the connector page from a deployed site |
 | `PROXVOCX_TIMEOUT_MS` | `20000` | Per-request fetch timeout |
-| `PROXVOCX_MAX_BYTES` | `524288` | Response body cap; larger bodies are truncated |
+| `PROXVOCX_MAX_BYTES` | `524288` | Response body cap on the database queue; larger bodies are truncated (the direct fast lane allows up to 8 MB) |
 | `PROXVOCX_ALLOW_PRIVATE` | `false` | Allow LAN/loopback targets (SSRF guard off) |
-| `PROXVOCX_USER_AGENT` | a browser-ish UA | UA sent to proxied sites |
+| `PROXVOCX_USER_AGENT` | desktop Chrome, matching the bundled Chromium | UA sent to proxied sites |
 
 ## 5. Use it
 
@@ -206,27 +224,102 @@ Open the site on your phone or laptop → **Client Site** → sign in. The serve
 picker appears; type the code showing on the PC. That is the last time you will
 see a code on this account.
 
-- **Browser mode** — type a URL. The PC fetches it and the page renders in a
-  sandboxed iframe (or a live, real browser tab — see below).
+- **Browser mode** — type a URL. The PC fetches it and the page runs here,
+  through one of three engines picked next to the URL bar — see below.
 - **PC Control mode** — hit Connect. Click into the picture to send input,
   press <kbd>Esc</kbd> to give the keyboard back.
+
+  - **Stream** (toolbar) — monitor, frame rate, what the encoder is tuned for,
+    the resolution sent, and **Smoothing**. A picture that is choppy but sharp
+    is usually network jitter: Smoothing holds frames 40–100 ms so they play
+    out evenly, at the cost of that much extra delay. The status bar says
+    when the PC's CPU, the network or the viewing device is the bottleneck;
+    hover it for what to try.
+  - **Remap keys** (toolbar) — turn a key on this keyboard into a different
+    key on the PC, e.g. a Chromebook's Search key into Shift. Rules are saved
+    per device. ChromeOS keeps Search for its launcher, so use **Fullscreen**:
+    the page then asks the browser (Keyboard Lock) to hand it system keys.
 
 The picker returns by itself whenever the selected PC drops offline.
 
 ## What Browser mode can and cannot do
 
-Browser mode has two entirely different engines, and which one runs is a
-setting on the PC (Settings → "Allow JavaScript in Browser mode", **off by
-default**):
+Browser mode has three engines, picked from the menu next to the URL bar
+(remembered per device):
 
-**Off (the default) — script-free page rewriter.** The fetched HTML is
+| Engine | Runs the page | JavaScript | Quality | Needs |
+| --- | --- | --- | --- | --- |
+| **Native** (default) | in your browser, via Scramjet | ✅ full | native | the browse site (below) |
+| **Safe** | in your browser, scripts stripped | ❌ | native, static | nothing |
+| **PC tab** | on the PC, streamed as video | ✅ full | video | "Allow JavaScript" on the PC |
+
+Whichever engine you pick, the PC makes every request — your device never
+talks to the site itself. If the native engine cannot run against a PC (an
+older connector, no direct connection possible, browse site not deployed) the
+client says why and falls back to Safe for that PC.
+
+### The native engine (Scramjet)
+
+This is how sites like Nebula get their quality: the real page runs in your
+browser, rewritten by [Scramjet](https://github.com/MercuryWorkshop/scramjet)
+so that every request it makes — page, script, image, XHR, WebSocket — is
+intercepted by a service worker and sent to your PC instead of the internet.
+Text is real text, video is real video, scrolling is your screen's own.
+
+How the traffic flows:
+
+```
+ proxied page ─▶ Scramjet SW ─▶ bare-mux ─▶ browse shell ══port══▶ client app ══WebRTC══▶ PC
+ (browse origin)             (SharedWorker)  (browse origin)      (app origin)   fast lane   fetch / ws
+```
+
+**It runs on a second origin, on purpose.** Scramjet runs proxied pages'
+JavaScript on whatever origin hosts it, and proxy rewriting is not a security
+boundary. The client app's origin holds the Firebase sign-in that can take
+over your PC, so Scramjet is hosted on a separate site that holds nothing —
+no sign-in, no Firebase, no credentials. The client hands that site a single
+MessagePort and relays its requests over the fast lane; the browse site never
+touches the PC or the database directly.
+
+**Deploying the browse site** (once):
+
+```bash
+firebase hosting:sites:create proxvocx-browse      # any free name; see below
+firebase deploy --only hosting,database
+```
+
+`.firebaserc` already maps the `browse` target to `proxvocx-browse`. If that
+name is taken, create another, update the `browse` entry in `.firebaserc`,
+and set `BROWSE_ORIGIN` in `public/js/firebase-config.js` to its URL — by
+default the client looks for `<this site>-browse.web.app`. Multiple sites per
+project are allowed on the free Spark plan; the browse site is plain static
+files (`public-browse/`), so any other static host works just as well.
+
+For local development, serve both (`npm run site` and `npm run site:browse`)
+and point the client at the second one from its devtools console:
+`localStorage.setItem('proxvocx.browseOrigin', 'http://localhost:5001')`.
+
+Known limits: links that open a new tab do not work (the new tab has no
+connection to the PC); sites that fingerprint hard or need DRM may still
+refuse; and the browse site needs `SharedWorker`, which some mobile browsers
+lack — the client falls back to Safe there.
+
+### Safe — script-free page rewriter
+
+The fetched HTML is
 rewritten and rendered in a `srcdoc` iframe **without `allow-scripts`**.
 Nothing from the remote site ever executes on your device — a deliberate
 trade:
 
 - ✅ Static pages, articles, docs, search results, forms (GET and POST)
 - ✅ Links, back/forward, images, stylesheets, background images and web fonts
-  (all individually proxied — nothing is fetched by your device directly)
+  (all individually proxied — nothing is fetched by your device directly, and
+  a Content-Security-Policy on the rendered page enforces that)
+- ✅ Sharp images on high-DPI screens: `srcset` and `<picture>` are honoured,
+  picking the candidate that suits this screen
+- ✅ Fast: requests travel a direct WebRTC data channel to the PC (falling back
+  to the database queue while it connects), and images/stylesheets are cached
+  for the session
 - ❌ Anything that needs JavaScript — SPAs, infinite scroll, most logins
 - ❌ Video, WebSockets, service workers
 
@@ -234,7 +327,9 @@ Navigation is driven from the parent page, which can reach into the `srcdoc`
 iframe because it inherits the origin. Links and form submissions are
 intercepted and replayed through the proxy instead of hitting the network.
 
-**On — a real, scripted browser tab, streamed to you.** There is no way to
+### PC tab — a real, scripted browser tab, streamed to you
+
+There is no way to
 reconstruct arbitrary JS-driven network behaviour (fetch, XHR, live sockets)
 in a client-side sandboxed iframe without rebuilding a general-purpose relay
 for every browser network primitive. Instead the PC opens the page in a real,
@@ -253,8 +348,8 @@ setting defaults off. Turning it on also means every site you browse to runs
 untrusted, fully capable JavaScript on the PC's own machine and network; that
 is the whole point (full compatibility), but it is a materially larger trust
 boundary than the sandboxed default, which is why it is opt-in rather than
-automatic. The client shows a one-time notice when it lands on a PC with the
-setting off, explaining what turning it on would get you.
+automatic. Picking the PC-tab engine against a PC with the setting off
+explains what turning it on would get you.
 
 One thing scripted mode still cannot do: a live multiplayer game or anything
 else needing a *direct* socket from your own device is out of scope no matter
@@ -265,11 +360,17 @@ what — the PC is genuinely the one browsing, so the socket lives there too.
 - **SSRF guard.** Targets resolving to loopback, private, link-local, CGNAT,
   multicast or reserved ranges are refused, and every redirect hop is
   re-checked. `PROXVOCX_ALLOW_PRIVATE=true` only if LAN proxying is the point.
-- **Header hygiene.** `host`, `cookie`, `content-length` and the hop-by-hop
-  headers are stripped from client-supplied headers; CR/LF is stripped from values.
-- **Cost.** Every proxied byte crosses the database twice and counts against
-  the RTDB bandwidth quota. Keep `PROXVOCX_MAX_BYTES` conservative on the free
-  tier. Control sessions cost almost nothing by comparison.
+- **Header hygiene.** For the Safe engine, `host`, `cookie`, `content-length`
+  and the hop-by-hop headers are stripped from client-supplied headers. The
+  native engine passes cookies and the page's own headers through (Scramjet
+  keeps the cookie jar, on the browse origin), but never `host`,
+  `content-length` or hop-by-hop headers. CR/LF is stripped from values
+  either way, and every request, redirect hop and WebSocket still meets the
+  SSRF guard.
+- **Cost.** Once the fast lane is open, browsing costs no database bandwidth
+  at all. Only the Safe engine's fallback queue (used while the lane
+  connects, or when it cannot) sends bytes through the database — keep
+  `PROXVOCX_MAX_BYTES` conservative on the free tier for that.
 - **NAT.** WebRTC uses public STUN only. If both ends sit behind symmetric NAT
   the connection will fail; add a TURN relay in `signaling.js` → `iceServers()`.
 - **Poison requests.** A request node is deleted after processing whether it
@@ -277,3 +378,15 @@ what — the PC is genuinely the one browsing, so the socket lives there too.
 - **Trust.** Pairing hands an account full control of that machine. The PC can
   revoke it at any time from Settings → Unpair, and can switch remote input off
   while leaving view access on.
+
+## License
+
+proxvocx is licensed under the **GNU Affero General Public License v3.0**
+(`AGPL-3.0-only`, see `LICENSE`), because it ships
+[Scramjet](https://github.com/MercuryWorkshop/scramjet), which is AGPL-3.0.
+In short: if other people use a copy of this that you host, they are entitled
+to its complete source, including your changes.
+
+Bundled third-party code keeps its own licence, next to it:
+`public-browse/scram/` (Scramjet, AGPL-3.0) and `public-browse/baremux/`
+(bare-mux, MIT).

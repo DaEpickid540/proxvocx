@@ -22,7 +22,7 @@ import { BrowserWindow } from 'electron';
 
 const DEFAULT_WIDTH = 1600;
 const DEFAULT_HEIGHT = 1000;
-const DEFAULT_FRAME_RATE = 30;
+const DEFAULT_FRAME_RATE = 60;
 /**
  * JPEG quality for the frames handed to the renderer.
  *
