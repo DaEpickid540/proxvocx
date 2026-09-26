@@ -82,7 +82,7 @@ off a screen and typed on a phone cannot be misread.
 | `public/js/fetch-tunnel.js` | Client: Browser mode's direct fast lane, with fallback to the queue |
 | `public/js/lane-frames.js` | Binary framing shared by both ends of the fast lane |
 | `public/js/client-native-browser.js` | Client: the native (Scramjet) engine — relays the browse shell to the fast lane |
-| `public-browse/` | The browse site: Scramjet's shell, service worker, and vendored Scramjet + bare-mux |
+| `public-browse/` | The browse site: Scramjet's shell (and its tabs), service worker, and vendored Scramjet + bare-mux |
 | `desktop/bridge/raw-fetch.js` | Browser-exact requests for the native engine |
 | `desktop/bridge/ws-relay.js` | WebSockets opened by the PC for the native engine |
 | `public/js/pc-fetch.js` | Connector: serves the fast lane over a WebRTC data channel |
@@ -299,10 +299,35 @@ For local development, serve both (`npm run site` and `npm run site:browse`)
 and point the client at the second one from its devtools console:
 `localStorage.setItem('proxvocx.browseOrigin', 'http://localhost:5001')`.
 
-Known limits: links that open a new tab do not work (the new tab has no
-connection to the PC); sites that fingerprint hard or need DRM may still
-refuse; and the browse site needs `SharedWorker`, which some mobile browsers
-lack — the client falls back to Safe there.
+**Tabs, and pages that open new windows.** The native engine has tabs: the
+strip above the URL bar, **+** for a new one, middle-click or **×** to close.
+Every tab is its own Scramjet frame inside the one browse shell, so they
+share its connection to the PC.
+
+That is also what makes sign-in pop-ups work. Left alone, a page's
+`window.open` or `target="_blank"` link would open a real browser tab on the
+browse origin — and the browser keeps a top-level tab in a different storage
+partition from the same site embedded in proxvocx, so that tab has no
+service worker, no port and no way to reach the PC. Instead the shell turns
+every new window into a tab of its own:
+
+- `window.open` returns the new tab's window; the popup gets
+  `window.opener` (kept across every page it goes through), `postMessage`
+  works both ways with the right origins, `window.close()` closes the tab,
+  and the opener sees `popup.closed` go true. An OAuth popup that bounces
+  through the provider and back to a callback page completes as it would in
+  a browser, and closing it drops you back on the tab that opened it.
+- `target="_blank"` links (with the implied `noopener`), ctrl/cmd-click and
+  middle-click (background tab), shift-click, named targets, and forms that
+  post to a new window all open tabs too.
+- Like a browser's pop-up blocker, `window.open` needs a real click behind
+  it; the client says when it blocks one.
+
+Known limits: sites that fingerprint hard or need DRM may still refuse; the
+browse site needs `SharedWorker`, which some mobile browsers lack — the
+client falls back to Safe there; and tabs belong to the native engine only
+(Safe renders one page; the PC-tab engine opens new windows in place on the
+PC). Tabs are closed when you switch engine or PC.
 
 ### Safe — script-free page rewriter
 

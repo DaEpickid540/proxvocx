@@ -15,20 +15,27 @@
  * at start-up, and everything Scramjet fetches or opens comes down that port
  * to here, where it is carried over the fast lane (fetch-tunnel.js) to the PC.
  *
- * So the one thing this module does, besides driving the URL bar, is relay:
- * port ↔ fast lane, for requests and for WebSockets.
+ * So the one thing this module does, besides driving the URL bar and the tab
+ * strip, is relay: port ↔ fast lane, for requests and for WebSockets.
+ *
+ * The tabs themselves live in the shell — each is a Scramjet frame there, so
+ * a page that opens a window (a sign-in popup, a target="_blank" link) gets a
+ * real sibling tab it can talk to. The shell reports the list; this module
+ * draws it above the URL bar and sends back what gets clicked.
  */
 import { normaliseUrl } from './client-browser.js';
+import { el } from './ui.js';
 
 const HANDSHAKE_READY = 'proxvocx-browse-ready';
 const HANDSHAKE_INIT = 'proxvocx-browse-init';
 const SHELL_TIMEOUT_MS = 20_000;
 
 export function createNativeBrowserViewer({
-  getMachineId, transport, browseOrigin, elements, onStatus, onUnavailable,
+  getMachineId, transport, browseOrigin, elements, onStatus, onUnavailable, onNotice,
 }) {
   const { stage, overlay, overlayTitle, overlayMessage, urlInput, urlLock, loadBar,
-          backBtn, forwardBtn } = elements;
+          backBtn, forwardBtn, tabList } = elements;
+  const blankOverlay = { title: overlayTitle.textContent, message: overlayMessage.textContent };
 
   let frame = null;
   let port = null;
@@ -38,6 +45,10 @@ export function createNativeBrowserViewer({
   const sockets = new Map();
   /** Relayed requests in flight, by the shell's id, so a reset can abort them. */
   const inFlight = new Map();
+  /** The shell's last word on its tabs. Empty until it has one open. */
+  let tabState = { tabs: [], active: null };
+  /** The address last put in the URL bar, so a title change alone leaves what is being typed there. */
+  let shownUrl = null;
 
   /* ── the shell ──────────────────────────────────────────────── */
 
@@ -109,7 +120,14 @@ export function createNativeBrowserViewer({
         finishLoading();
         return;
       case 'nav':
-        if (message.url) {
+        // The active tab changed, or its address or title did. A tab with no
+        // address is a new, empty one.
+        if (!message.url) {
+          showBlank();
+          return;
+        }
+        if (message.url !== shownUrl) {
+          shownUrl = message.url;
           urlInput.value = message.url;
           setLock(message.url);
         }
@@ -119,6 +137,14 @@ export function createNativeBrowserViewer({
         return;
       case 'loading':
         if (message.loading) startLoading(); else finishLoading();
+        return;
+      case 'tabs':
+        tabState = { tabs: Array.isArray(message.tabs) ? message.tabs : [], active: message.active };
+        if (!tabState.tabs.length) showBlank();
+        renderTabs();
+        return;
+      case 'notice':
+        if (message.message) onNotice?.(String(message.message));
         return;
       case 'fetch': relayFetch(message); return;
       case 'ws-open': relaySocketOpen(message); return;
@@ -182,6 +208,7 @@ export function createNativeBrowserViewer({
       return;
     }
     urlInput.value = url;
+    shownUrl = url;
     setLock(url);
     startLoading();
     onStatus?.({ text: `Connecting to ${hostOf(url)}…` });
@@ -206,6 +233,17 @@ export function createNativeBrowserViewer({
 
   const command = (t) => () => port?.postMessage({ t });
 
+  /**
+   * A new, empty tab. Before the shell is up there is only the one tab this
+   * page shows, and it is already empty or about to be used; after, the shell
+   * opens it and reports back.
+   */
+  function newTab() {
+    if (port) port.postMessage({ t: 'tab-new' });
+    else showBlank();
+    urlInput.focus();
+  }
+
   function reset() {
     for (const controller of inFlight.values()) controller.abort();
     inFlight.clear();
@@ -219,9 +257,72 @@ export function createNativeBrowserViewer({
     frame = null;
     shellReady = null;
     stage.dataset.state = 'empty';
+    tabState = { tabs: [], active: null };
+    shownUrl = null;
+    renderTabs();
+  }
+
+  /* ── tab strip ──────────────────────────────────────────────── */
+
+  function renderTabs() {
+    if (!tabList) return;
+    const list = tabState.tabs.length
+      ? tabState.tabs
+      : [{ id: null, url: '', title: '', loading: false }];
+    // Redrawn whole on every report (titles change under it), so keyboard
+    // focus on a tab has to be carried across.
+    const focused = tabList.contains(document.activeElement)
+      ? { id: document.activeElement.closest('.tab')?.dataset.id, part: document.activeElement.className }
+      : null;
+    tabList.replaceChildren(...list.map((tab) => {
+      const active = tab.id === tabState.active || tab.id == null;
+      const label = tab.title || (tab.url && tab.url !== 'about:blank' ? hostOf(tab.url) : 'New tab');
+      const select = () => { if (tab.id != null && !active) port?.postMessage({ t: 'tab-select', id: tab.id }); };
+      const close = () => { if (tab.id != null) port?.postMessage({ t: 'tab-close', id: tab.id }); };
+      return el('div', {
+        class: `tab${active ? ' active' : ''}${tab.loading ? ' loading' : ''}`,
+        dataset: { id: String(tab.id) },
+        title: tab.url && tab.url !== label ? `${label}\n${tab.url}` : label,
+        // Middle-click closes, as it does in a browser.
+        onAuxclick: (event) => { if (event.button === 1) { event.preventDefault(); close(); } },
+        onMousedown: (event) => { if (event.button === 1) event.preventDefault(); },
+      },
+        el('button', {
+          class: 'tab-main', role: 'tab', 'aria-selected': String(active), onClick: select,
+        },
+          el('span', { class: 'tab-icon', 'aria-hidden': 'true' }, initialOf(tab)),
+          el('span', { class: 'tab-title' }, label),
+        ),
+        tab.id == null ? null : el('button', {
+          class: 'tab-close', title: 'Close tab', 'aria-label': `Close ${label}`, onClick: close,
+        }, '×'),
+      );
+    }));
+    if (focused) tabList.querySelector(`.tab[data-id="${focused.id}"] .${focused.part}`)?.focus();
+
+    // Keep the active tab in view. Not scrollIntoView: that scrolls every
+    // ancestor too, and the page has no business moving for this.
+    const current = tabList.querySelector('.tab.active');
+    if (current) {
+      const { offsetLeft: left, offsetWidth: width } = current;
+      if (left < tabList.scrollLeft) tabList.scrollLeft = left;
+      else if (left + width > tabList.scrollLeft + tabList.clientWidth) tabList.scrollLeft = left + width - tabList.clientWidth;
+    }
   }
 
   /* ── chrome ─────────────────────────────────────────────────── */
+
+  /** The empty-tab page: the start screen, with the URL bar cleared for typing. */
+  function showBlank() {
+    overlayTitle.textContent = blankOverlay.title;
+    overlayMessage.textContent = blankOverlay.message;
+    overlay.hidden = false;
+    stage.dataset.state = 'empty';
+    shownUrl = '';
+    urlInput.value = '';
+    setLock('');
+    onStatus?.({ text: 'New tab' });
+  }
 
   function updateNavButtons() {
     // Scramjet keeps the page's real history inside the shell; there is no
@@ -253,8 +354,11 @@ export function createNativeBrowserViewer({
     catch { urlLock.classList.remove('secure'); }
   }
 
+  renderTabs();
+
   return {
     go,
+    newTab,
     back: command('back'),
     forward: command('forward'),
     reload: command('reload'),
@@ -265,6 +369,13 @@ export function createNativeBrowserViewer({
 
 function hostOf(url) {
   try { return new URL(url).host; } catch { return url || ''; }
+}
+
+/** A tab's stand-in for a favicon: the first letter of its site. */
+function initialOf(tab) {
+  let host = '';
+  try { host = new URL(tab.url).hostname.replace(/^www\./, ''); } catch { /* blank tab */ }
+  return (host || tab.title || '+').slice(0, 1).toUpperCase();
 }
 
 /**
