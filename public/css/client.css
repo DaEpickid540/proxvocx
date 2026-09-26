@@ -53,6 +53,124 @@ body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; 
 .pane.active { display: flex; }
 
 /* ── BROWSER MODE ────────────────────────────────────────────── */
+
+/* Tabs (native engine). The active tab takes the omnibar's colour so the two
+   read as one piece, the way a desktop browser's do. */
+.tab-strip {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  padding: 6px 8px 0;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  min-width: 0;
+}
+.tab-strip[hidden] { display: none; }
+.tab-list {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tab-list::-webkit-scrollbar { display: none; }
+.tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 1 auto;
+  width: 200px;
+  min-width: 96px;
+  height: 32px;
+  margin-bottom: -1px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  color: var(--text-3);
+  transition: background var(--tr), color var(--tr);
+}
+.tab:hover { background: var(--bg-inset); color: var(--text-2); }
+.tab.active {
+  background: var(--bg-card);
+  border-color: var(--border);
+  color: var(--text);
+}
+.tab-main {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px 0 10px;
+  color: inherit;
+  font-size: 0.74rem;
+  text-align: left;
+}
+.tab-icon {
+  width: 16px; height: 16px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  color: var(--text-3);
+  font-size: 0.6rem;
+  font-weight: 600;
+  line-height: 14px;
+  text-align: center;
+}
+.tab.active .tab-icon { color: var(--accent); border-color: var(--accent-border); background: var(--accent-bg); }
+/* Loading: the icon becomes a spinner. */
+.tab.loading .tab-icon {
+  color: transparent;
+  background: none;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: tab-spin 0.8s linear infinite;
+}
+@keyframes tab-spin { to { transform: rotate(360deg); } }
+.tab-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.tab-close {
+  width: 20px; height: 20px;
+  flex-shrink: 0;
+  margin-right: 6px;
+  border-radius: 50%;
+  color: var(--text-3);
+  font-size: 0.95rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--tr), color var(--tr);
+}
+.tab-close:hover { background: var(--bg-inset); color: var(--text); }
+.tab-new {
+  width: 28px; height: 28px;
+  flex-shrink: 0;
+  margin-bottom: 2px;
+  border-radius: var(--r-sm);
+  color: var(--text-3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--tr), color var(--tr);
+}
+.tab-new:hover { background: var(--bg-inset); color: var(--text); }
+.tab-new svg { width: 15px; height: 15px; }
+@media (prefers-reduced-motion: reduce) {
+  .tab.loading .tab-icon { animation-duration: 2.4s; }
+}
+
 .omnibar {
   display: flex;
   align-items: center;
@@ -491,4 +609,6 @@ body { display: flex; flex-direction: column; height: 100dvh; overflow: hidden; 
   .segmented-opt { padding: 6px 10px; font-size: 0.68rem; }
   .segmented-opt .seg-label { display: none; }
   .omnibar { padding: 7px 8px; }
+  .tab { width: 136px; flex-shrink: 0; }
+  .tab-strip { padding: 5px 6px 0; }
 }

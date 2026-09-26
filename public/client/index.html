@@ -48,6 +48,15 @@
 
 <!-- ── BROWSER MODE ─────────────────────────────────────────── -->
 <section class="pane active" id="paneBrowser">
+  <!-- Tabs, for the native engine. Pages that open a new window (sign-in
+       pop-ups, target="_blank" links) open a tab here. -->
+  <div class="tab-strip" id="tabStrip" hidden>
+    <div class="tab-list" id="tabList" role="tablist" aria-label="Tabs"></div>
+    <button class="tab-new" id="tabNew" title="New tab" aria-label="New tab">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+  </div>
+
   <div class="omnibar">
     <button class="nav-btn" id="navBack" title="Back" disabled>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>

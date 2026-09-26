@@ -143,6 +143,10 @@ function syncBrowserEngine() {
     state.activeEngine = engine;
     $('#browserFrame').hidden = engine !== 'safe';
     $('#browserVideo').hidden = engine !== 'pctab';
+    // Tabs are the native engine's: each is a page running in this browser.
+    // The other two engines have one page each (the PC tab's is on the PC).
+    const strip = $('#tabStrip');
+    if (strip) strip.hidden = engine !== 'native';
   }
   renderEnginePicker();
 }
@@ -917,6 +921,7 @@ async function main() {
       loadBar: $('#loadBar'),
       backBtn: $('#navBack'),
       forwardBtn: $('#navForward'),
+      tabList: $('#tabList'),
     },
     onStatus: ({ text }) => {
       $('#statusText').textContent = text;
@@ -924,7 +929,11 @@ async function main() {
       $('#statusTime').textContent = '';
     },
     onUnavailable: nativeUnavailable,
+    onNotice: (message) => toast(message, 'info', 6000),
   });
+  // Null-guarded: a browser holding a cached index.html from before tabs
+  // must still boot against this script.
+  $('#tabNew')?.addEventListener('click', () => state.nativeBrowser.newTab());
   $('#browserEngine')?.replaceChildren(...Object.entries(ENGINES).map(([value, label]) =>
     el('option', { value }, label)));
   $('#browserEngine')?.addEventListener('change', (event) => chooseEngine(event.target.value));

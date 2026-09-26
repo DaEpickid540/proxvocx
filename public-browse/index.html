@@ -7,7 +7,9 @@
   <title>proxvocx browse</title>
   <style>
     html, body { margin: 0; height: 100%; background: #fff; overflow: hidden; }
-    .page { width: 100%; height: 100%; border: 0; display: block; }
+    /* One frame per tab, stacked; only the active tab's is shown. */
+    .page { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: block; background: #fff; }
+    .page[hidden] { display: none; }
     .notice {
       font: 14px/1.6 system-ui, sans-serif; color: #444; padding: 24px; max-width: 560px;
     }
