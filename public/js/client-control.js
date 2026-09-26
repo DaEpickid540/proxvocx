@@ -32,9 +32,15 @@ const SMOOTHING_KEY = 'proxvocx.smoothing';
  * (one frame 5 ms late, the next 25 ms) becomes unevenness on screen. A small
  * buffer absorbs that and hands frames over at a steady pace, at the cost of
  * exactly that much extra delay between your hand and the cursor.
+ *
+ * Off is the default because the delay is the thing people notice. Measured
+ * capture-to-screen in Chromium, Light over Off cost 14 ms on a clean link and
+ * 11 ms with 0–40 ms of arrival jitter. That delay lands on every movement of
+ * the cursor, while the steadier pacing it buys only shows on a jittery link.
+ * Anyone on one can still turn it up.
  */
 export const SMOOTHING = {
-  off: { ms: 0, label: 'Off — lowest latency (games on a wired link)' },
+  off: { ms: 0, label: 'Off — lowest latency' },
   light: { ms: 40, label: 'Light — steadier picture, about 40 ms more delay' },
   heavy: { ms: 100, label: 'Heavy — for bad wifi, about 100 ms more delay' },
 };
@@ -392,7 +398,16 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState, 
   }
 
   function bindInput() {
-    video.addEventListener('pointermove', (event) => {
+    // Chromium holds `pointermove` back to the next animation frame and merges
+    // whatever arrived meanwhile into it. So a movement that starts from rest
+    // can wait up to a whole frame (16 ms at 60 Hz) before it leaves this
+    // device, and the PC gets fewer positions per second than the mouse
+    // reported. `pointerrawupdate` fires as soon as the OS reports the motion.
+    // It is Chromium-only and secure-context-only, so everywhere else this is
+    // still `pointermove`, exactly as before. Never both: each move would be
+    // counted twice, which for relative motion doubles the distance.
+    const moveEvent = 'onpointerrawupdate' in window ? 'pointerrawupdate' : 'pointermove';
+    video.addEventListener(moveEvent, (event) => {
       if (mouseLocked) {
         if (skipNextMove) {
           skipNextMove = false;
@@ -666,15 +681,15 @@ export function createControlViewer({ db, uid, getMachineId, elements, onState, 
   function loadSmoothing() {
     try {
       const saved = localStorage.getItem(SMOOTHING_KEY);
-      return SMOOTHING[saved] ? saved : 'light';
+      return SMOOTHING[saved] ? saved : 'off';
     } catch {
-      return 'light';
+      return 'off';
     }
   }
 
   function applySmoothing() {
     if (!videoReceiver) return;
-    const { ms } = SMOOTHING[smoothing] || SMOOTHING.light;
+    const { ms } = SMOOTHING[smoothing] || SMOOTHING.off;
     // `jitterBufferTarget` is the standard knob (milliseconds);
     // `playoutDelayHint` is Chromium's older one (seconds). Setting both
     // covers browsers that only have one.
