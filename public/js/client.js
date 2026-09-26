@@ -486,7 +486,7 @@ const RESOLUTIONS = [
 
 /** What each `limit` reason means, and what to try, for the status bar. */
 const LIMITS = {
-  bandwidth: ['limited by network', 'The link cannot carry this picture. Try Smoothing, a lower resolution or 30 fps, or a wired connection on the PC.'],
+  bandwidth: ['limited by network', 'The link cannot carry this picture. Try a lower resolution or 30 fps, or a wired connection on the PC.'],
   cpu: ['limited by PC CPU', 'The PC cannot encode fast enough. Try a lower resolution or frame rate, or set the PC\'s codec to "Prefer smoothness (H.264)".'],
   decode: ['limited by this device', 'This device is dropping frames it received — it cannot decode or draw them in time. Try 720p or a lower frame rate.'],
   other: ['limited', 'The PC is sending less than it was asked for.'],
@@ -608,7 +608,8 @@ function openStreamModal() {
         smooth,
       ),
       el('p', { class: 'field-note' },
-        'Choppy but not blurry is usually network jitter — turn Smoothing up. '
+        'Smoothing is added delay: leave it Off for the quickest response. Turn it up only '
+        + 'if the picture is sharp but moves unevenly, which is network jitter. '
         + 'The status bar says when the PC, the network or this device is the bottleneck.'),
 
       el('div', { class: 'modal-footer' },

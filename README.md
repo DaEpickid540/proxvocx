@@ -230,9 +230,10 @@ see a code on this account.
   press <kbd>Esc</kbd> to give the keyboard back.
 
   - **Stream** (toolbar) — monitor, frame rate, what the encoder is tuned for,
-    the resolution sent, and **Smoothing**. A picture that is choppy but sharp
-    is usually network jitter: Smoothing holds frames 40–100 ms so they play
-    out evenly, at the cost of that much extra delay. The status bar says
+    the resolution sent, and **Smoothing**. Smoothing is off by default, for
+    the lowest latency. A picture that is choppy but sharp is usually network
+    jitter: Smoothing holds frames 40–100 ms so they play out evenly, at the
+    cost of that much extra delay. The status bar says
     when the PC's CPU, the network or the viewing device is the bottleneck;
     hover it for what to try.
   - **Remap keys** (toolbar) — turn a key on this keyboard into a different
